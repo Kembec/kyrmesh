@@ -134,6 +134,7 @@ headscale/
 ├── cmd/
 │   ├── headscale/    # Main headscale server binary
 │   └── hi/           # Integration test runner (see cmd/hi/README.md)
+├── cmdline/          # Command-line parser and Tab completion (stdlib only; script/ uses cobra)
 ├── hscontrol/        # Core control plane
 ├── integration/      # End-to-end Docker-based tests (see integration/README.md)
 ├── proto/            # Protocol buffer definitions
