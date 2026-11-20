@@ -417,6 +417,13 @@ auto_update:
   # Clients store the default they first see, so a later change reaches only new
   # clients.
   enabled: false
+  # Reads the newest stable Tailscale client from
+  # https://pkgs.tailscale.com/stable/?mode=json at start and every six hours,
+  # for the `updateAvailable` of a node in the API. Set it to false for a server
+  # that must not call out, or that cannot reach the internet; `updateAvailable`
+  # is then always false. `disable_check_updates` is about Headscale's own
+  # version and does not change it.
+  check_versions: true
 
 # How the headscale CLI reaches the server: the local `unix_socket` without
 # authentication, or a remote `cli.address` with `cli.api_key`. The CLI reads
