@@ -1,0 +1,14 @@
+{
+  "grants": [
+    {
+      "src": ["alice@", "bob@"],
+      "dst": ["svc@"],
+      "ip": ["tcp:28080"]
+    }
+  ],
+  "tests": [
+    {"src": "alice@", "accept": ["svc@:28080"], "deny": ["svc@:28081"]},
+    {"src": "bob@", "accept": ["svc@:28080"], "deny": ["svc@:28081"]},
+    {"src": "mallory@", "deny": ["svc@:28080", "svc@:28081"]}
+  ]
+}
