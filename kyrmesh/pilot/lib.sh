@@ -13,7 +13,8 @@ HS_METRICS_PORT="${HS_METRICS_PORT:-19090}"
 HS_GRPC_PORT="${HS_GRPC_PORT:-50444}"
 RESOURCE_PORT=28080      # the only port the policy grants
 OUTSIDE_PORT=28081       # served on the same device, outside the policy
-WAIT_S="${KYRMESH_WAIT_S:-60}"
+# 150 s: on a host at load 40 the first WireGuard session took over 60 s and `up` failed twice (20/11).
+WAIT_S="${KYRMESH_WAIT_S:-150}"
 
 # Each device: its owner (Headscale user; none for the intruder) and SOCKS5 port.
 DEVICES="resource laptop phone outsider intruder"
