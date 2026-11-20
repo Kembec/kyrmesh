@@ -1,0 +1,16 @@
+# Headscale refuses to start with an empty DERP map. The pilot declares one
+# region whose only node is a closed loopback port: no relay is reachable, so
+# every packet between pilot devices travels on a direct WireGuard path.
+regions:
+  901:
+    regionid: 901
+    regioncode: norelay
+    regionname: Kyrmesh pilot (no relay)
+    nodes:
+      - name: 901a
+        regionid: 901
+        hostname: 127.0.0.1
+        ipv4: 127.0.0.1
+        stunport: -1
+        stunonly: false
+        derpport: 9

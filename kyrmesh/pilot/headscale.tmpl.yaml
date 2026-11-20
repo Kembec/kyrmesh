@@ -1,0 +1,48 @@
+# Kyrmesh pilot control server. @RUN@ is replaced by the run directory.
+# Everything listens on loopback; nothing is reachable from another host.
+server_url: http://127.0.0.1:@HS_PORT@
+listen_addr: 127.0.0.1:@HS_PORT@
+metrics_listen_addr: 127.0.0.1:@HS_METRICS_PORT@
+grpc_listen_addr: 127.0.0.1:@HS_GRPC_PORT@
+grpc_allow_insecure: false
+noise:
+  private_key_path: @RUN@/hs/noise_private.key
+prefixes:
+  v4: 100.64.0.0/10
+  v6: fd7a:115c:a1e0::/48
+  allocation: sequential
+derp:
+  server:
+    enabled: false
+  urls: []
+  paths:
+    - @RUN@/hs/derp-norelay.yaml
+  auto_update_enabled: false
+disable_check_updates: true
+node:
+  expiry: 0
+database:
+  type: sqlite
+  sqlite:
+    path: @RUN@/hs/db.sqlite
+    write_ahead_log: true
+log:
+  level: info
+  format: text
+policy:
+  mode: file
+  path: @RUN@/hs/policy.json
+dns:
+  magic_dns: false
+  override_local_dns: false
+  nameservers:
+    global: []
+unix_socket: @RUN@/hs/headscale.sock
+unix_socket_permission: "0700"
+logtail:
+  enabled: false
+taildrop:
+  enabled: false
+# The pilot also runs on loaded laptops: give the CLI time to get an answer.
+cli:
+  timeout: 30s
