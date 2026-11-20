@@ -39,6 +39,35 @@ var (
 	errOrderTooSoon = errors.New("last order was less than an hour ago")
 )
 
+// orderTooSoon says how long until the next order is allowed.
+type orderTooSoon struct{ wait time.Duration }
+
+func (e orderTooSoon) Error() string        { return fmt.Sprintf("%s; next in %s", errOrderTooSoon, e.wait) }
+func (e orderTooSoon) Is(target error) bool { return target == errOrderTooSoon }
+
+// orderWait is how long the mark still blocks an order: zero without a mark,
+// once the gap has passed, or when the mark is in the future (the clock went
+// back) — a mark must never block forever (second review, 20/11).
+func orderWait(markTime, now time.Time) time.Duration {
+	elapsed := now.Sub(markTime)
+	if elapsed < 0 || elapsed >= minOrderGap {
+		return 0
+	}
+
+	return minOrderGap - elapsed
+}
+
+// retryAfter is the CA's own wait on a rate limit. obtain wraps errors, and
+// acme.RateLimit only accepts the bare *acme.Error, so it is unwrapped here.
+func retryAfter(err error) (time.Duration, bool) {
+	var aerr *acme.Error
+	if !errors.As(err, &aerr) {
+		return 0, false
+	}
+
+	return acme.RateLimit(aerr)
+}
+
 // obtain runs one DNS-01 order for the wildcard and installs the result.
 func (m *Manager) obtain(ctx context.Context) error {
 	if err := os.MkdirAll(m.cfg.CacheDir, 0o700); err != nil { //nolint:noinlineerr
@@ -46,12 +75,10 @@ func (m *Manager) obtain(ctx context.Context) error {
 	}
 
 	mark := filepath.Join(m.cfg.CacheDir, attemptFile)
-	if info, err := os.Stat(mark); err == nil && m.now().Sub(info.ModTime()) < minOrderGap {
-		return errOrderTooSoon
-	}
-
-	if err := writeFile(mark, []byte(m.now().UTC().Format(time.RFC3339)+"\n")); err != nil { //nolint:noinlineerr
-		return err
+	if info, err := os.Stat(mark); err == nil {
+		if wait := orderWait(info.ModTime(), m.now()); wait > 0 {
+			return orderTooSoon{wait: wait}
+		}
 	}
 
 	accountKey, err := loadOrCreateKey(filepath.Join(m.cfg.CacheDir, accountKeyFile))
@@ -68,6 +95,12 @@ func (m *Manager) obtain(ctx context.Context) error {
 
 	if _, err := client.Register(ctx, account, acme.AcceptTOS); err != nil && !errors.Is(err, acme.ErrAccountAlreadyExists) { //nolint:noinlineerr
 		return fmt.Errorf("registering acme account: %w", err)
+	}
+
+	// The mark goes right before the order, once the CA answered: a network
+	// failure before this point placed no order and must not hold the next one.
+	if err := writeFile(mark, []byte(m.now().UTC().Format(time.RFC3339)+"\n")); err != nil { //nolint:noinlineerr
+		return err
 	}
 
 	order, err := client.AuthorizeOrder(ctx, acme.DomainIDs(m.cfg.Wildcard))

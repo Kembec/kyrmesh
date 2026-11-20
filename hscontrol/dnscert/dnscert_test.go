@@ -10,6 +10,7 @@ import (
 	"crypto/x509/pkix"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"math/big"
 	"net/http"
@@ -19,6 +20,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"golang.org/x/crypto/acme"
 )
 
 const (
@@ -299,7 +302,49 @@ func TestARecentOrderBlocksAnotherOne(t *testing.T) {
 	}
 
 	// Without the guard this would reach the CA: a restart loop reissuing.
-	if err := m.obtain(context.Background()); !errors.Is(err, errOrderTooSoon) {
-		t.Fatalf("obtain = %v, want errOrderTooSoon", err)
+	err := m.obtain(context.Background())
+
+	var tooSoon orderTooSoon
+	if !errors.As(err, &tooSoon) || !errors.Is(err, errOrderTooSoon) {
+		t.Fatalf("obtain = %v, want orderTooSoon", err)
+	}
+
+	if tooSoon.wait <= 0 || tooSoon.wait > minOrderGap {
+		t.Fatalf("wait = %s, want what is left of %s", tooSoon.wait, minOrderGap)
+	}
+}
+
+func TestOrderWaitIsWhatIsLeftAndNeverForever(t *testing.T) {
+	now := time.Date(2026, 11, 20, 12, 0, 0, 0, time.UTC)
+
+	cases := map[string]struct {
+		mark time.Time
+		want time.Duration
+	}{
+		"59 minutes ago":  {now.Add(-59 * time.Minute), time.Minute},
+		"an hour ago":     {now.Add(-time.Hour), 0},
+		"clock went back": {now.Add(3 * time.Hour), 0},
+	}
+	for name, tc := range cases {
+		if got := orderWait(tc.mark, now); got != tc.want {
+			t.Errorf("%s: orderWait = %s, want %s", name, got, tc.want)
+		}
+	}
+}
+
+func TestRetryAfterReadsAWrappedRateLimit(t *testing.T) {
+	header := http.Header{}
+	header.Set("Retry-After", "3600")
+
+	limited := &acme.Error{StatusCode: http.StatusTooManyRequests, ProblemType: "urn:ietf:params:acme:error:rateLimited", Header: header}
+	wrapped := fmt.Errorf("creating order: %w", limited)
+
+	wait, ok := retryAfter(wrapped)
+	if !ok || wait < 59*time.Minute {
+		t.Fatalf("retryAfter = %s, %v; want about an hour", wait, ok)
+	}
+
+	if _, ok := retryAfter(errors.New("boom")); ok {
+		t.Fatal("a plain error is not a rate limit")
 	}
 }
