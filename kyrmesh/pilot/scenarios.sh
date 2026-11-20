@@ -41,7 +41,15 @@ scenario_allow() {
 # direct_session <device> <peer ip>: a WireGuard pong and a confirmed direct
 # address at the same time. Magicsock drops the confirmed address when it goes
 # stale and sprays the candidates until a pong confirms one again.
-direct_session() { tsmp_pong "$1" "$2" && [[ "$(peer_facts "$1" "$2")" != '|'* ]]; }
+# The facts seen with the pong are kept: read again later, the address had
+# already gone stale once and S1 failed with "direct path none" (20/11, run 3).
+direct_session() {
+  local facts
+  tsmp_pong "$1" "$2" || return 1
+  facts=$(peer_facts "$1" "$2")
+  [[ "$facts" != '|'* ]] || return 1
+  printf '%s\n' "$facts" >"$RUN/nodes/$1/direct"
+}
 
 scenario_encryption() {
   local dev ip facts curaddr relay handshake pubkey hs_key tsmp
@@ -49,8 +57,9 @@ scenario_encryption() {
   hs_key=$(node_field resource node_key)
   for dev in laptop phone; do
     tsmp=no
+    rm -f "$RUN/nodes/$dev/direct"
     wait_for "$WAIT_S" direct_session "$dev" "$ip" && tsmp=yes
-    facts=$(peer_facts "$dev" "$ip")
+    facts=$(cat "$RUN/nodes/$dev/direct" 2>/dev/null || peer_facts "$dev" "$ip")
     IFS='|' read -r curaddr relay handshake pubkey <<<"$facts"
     verdict "S1 e2e $dev <-> resource" \
       "WireGuard pong $tsmp, handshake ${handshake:-none}, direct path ${curaddr:-none}, relay ${relay:-none} unused, peer key ${pubkey:0:16}… = headscale ${hs_key:0:16}…" \
