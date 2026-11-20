@@ -6,12 +6,14 @@
 
 host_tailscale() {
   if ! command -v tailscale >/dev/null 2>&1; then echo "tailscale: not installed"; return; fi
-  tailscale status --json 2>/dev/null | python3 -c '
+  local raw
+  raw=$(tailscale status --json 2>/dev/null) || { echo "tailscale: unreadable"; return; }
+  printf '%s' "$raw" | python3 -c '
 import json, sys
 try:
     d = json.load(sys.stdin)
 except ValueError:
-    print("tailscale: no daemon on the default socket"); sys.exit()
+    print("tailscale: unreadable"); sys.exit()
 s = d.get("Self") or {}
 print("state", d.get("BackendState"))
 print("self", s.get("ID"), " ".join(s.get("TailscaleIPs") or []))
@@ -44,11 +46,20 @@ host_snapshot() {
   host_tailscale
 }
 
-host_same() { cmp -s "$RESULTS/$1" "$RESULTS/$2"; }
+# Facts = snapshot lines that are not section headers. A host read that came
+# back nearly empty (80 on the reference Mac) proves nothing when "equal".
+MIN_HOST_FACTS=20
+host_facts() { grep -vc '^##' "$RESULTS/$1" || true; }
+host_same() {
+  cmp -s "$RESULTS/$1" "$RESULTS/$2" && (( $(host_facts "$1") >= MIN_HOST_FACTS && $(host_facts "$2") >= MIN_HOST_FACTS )) \
+    && ! grep -q 'tailscale: unreadable' "$RESULTS/$1" "$RESULTS/$2"
+}
 
 host_diff() {
   if host_same "$1" "$2"; then
-    echo "identical ($(grep -c . "$RESULTS/$1") facts: interfaces, routes, resolvers, host tailscale)"
+    echo "identical ($(host_facts "$1") facts: interfaces, routes, resolvers, host tailscale)"
+  elif cmp -s "$RESULTS/$1" "$RESULTS/$2"; then
+    echo "identical but unreliable: $(host_facts "$1") and $(host_facts "$2") facts (need $MIN_HOST_FACTS), or host tailscale unreadable"
   else
     diff "$RESULTS/$1" "$RESULTS/$2" | grep -E '^[<>]' | head -n 4 | tr '\n' ';'
   fi

@@ -58,9 +58,17 @@ start_bg() { # start_bg <pidfile> <logfile> <command...>
 }
 
 stop_pidfile() {
-  local pidfile="$1" pid
+  local pidfile="$1" pid cmd
   [[ -f "$pidfile" ]] || return 0
   pid=$(cat "$pidfile")
+  # A recycled pid must never be killed: only a process whose command line
+  # names this run directory or one of the pilot binaries is ours.
+  cmd=$(ps -p "$pid" -o command= 2>/dev/null || true)
+  if [[ -z "$cmd" ]]; then rm -f "$pidfile"; return 0; fi
+  if [[ "$cmd" != *"$RUN"* && "$cmd" != *"${HEADSCALE_BIN:-@none@}"* && "$cmd" != *"${TAILSCALED_BIN:-@none@}"* ]]; then
+    log "pid $pid is not a pilot process ($cmd): not signalling it"
+    rm -f "$pidfile"; return 0
+  fi
   kill "$pid" 2>/dev/null || true
   wait_for 10 bash -c "! kill -0 $pid" || kill -9 "$pid" 2>/dev/null || true
   rm -f "$pidfile"
@@ -113,5 +121,7 @@ new_key() {
   else
     hs preauthkeys create "$@" -o json | json "d['key']" >"$file"
   fi
+  # A failed create inside $() would otherwise leave an empty file and a "valid" path.
+  if [[ "$(cat "$file")" != hskey-auth-* ]]; then rm -f "$file"; return 1; fi
   printf '%s\n' "$file"
 }

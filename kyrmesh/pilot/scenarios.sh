@@ -63,6 +63,11 @@ scenario_deny_port() {
   local ip local_ok=no
   ip=$(ts_ip resource)
   wait_for 30 curl --silent --fail --max-time 5 "http://127.0.0.1:$OUTSIDE_PORT/marker" && local_ok=yes
+  # A refusal only counts if laptop is up and does reach the allowed port.
+  if ! device_running laptop || ! fetch_quiet laptop "$ip" "$RESOURCE_PORT" /marker; then
+    record "S2 deny resource:$OUTSIDE_PORT (outside policy)" FAIL "laptop $(backend_state laptop) or cannot reach allowed port $RESOURCE_PORT: the refusal proves nothing"
+    return
+  fi
   if fetch laptop "$ip" "$OUTSIDE_PORT" /marker >/dev/null 2>&1; then
     record "S2 deny resource:$OUTSIDE_PORT (outside policy)" FAIL "laptop reached it"
   else
@@ -74,6 +79,10 @@ scenario_deny_port() {
 scenario_deny_device() {
   local ip seen
   ip=$(ts_ip resource)
+  if ! device_running outsider; then
+    record "S2 deny outsider (registered, no grant)" FAIL "outsider is $(backend_state outsider), not Running: the refusal proves nothing"
+    return
+  fi
   seen=$(peer_facts outsider "$ip")
   if fetch outsider "$ip" "$RESOURCE_PORT" /marker >/dev/null 2>&1; then
     record "S2 deny outsider (registered, no grant)" FAIL "outsider reached resource"
@@ -108,14 +117,14 @@ scenario_unauthorized() {
   local real forged expired
   # Well formed and naming a real, unused key, with a different secret: the
   # rejection has to come from the secret check, not from the format.
-  real=$(new_key alice --expiration 10m)
+  real=$(new_key alice --expiration 10m) || { record "S2 intruder keys" FAIL "no valid hskey-auth- key could be created"; return; }
   forged="$RUN/keys/forged"
   printf '%s%s\n' "$(head -c 24 "$real")" "$(od -An -N32 -tx1 /dev/urandom | tr -d ' \n')" >"$forged"
   chmod 600 "$forged"
   rm -f "$real"
   attempt "S2 intruder with forged key" "invalid auth key" join intruder "$forged"
 
-  expired=$(new_key alice --expiration 1s)
+  expired=$(new_key alice --expiration 1s) || { record "S2 intruder with expired key" FAIL "no valid hskey-auth- key could be created"; return; }
   sleep 3
   attempt "S2 intruder with expired key" "expired" join intruder "$expired"
 
@@ -130,8 +139,12 @@ peer_state() {
   ts "$1" status --json | json "next(('expired' if p.get('Expired') else 'present' for p in (d.get('Peer') or {}).values() if '$2' in p.get('TailscaleIPs',[])), 'absent')"
 }
 
+phone_daemon_alive() { local pid; pid=$(cat "$RUN/nodes/phone/pid" 2>/dev/null) && [[ -n "$pid" ]] && kill -0 "$pid" 2>/dev/null; }
+
+# A dead daemon is not a revocation: the phone must still answer, and not as Running.
 phone_gone() { # the phone is logged out and the resource no longer trusts it as a peer
-  [[ "$(backend_state phone)" != Running && "$(peer_state resource "$1")" != present ]]
+  phone_daemon_alive && [[ "$(backend_state phone)" != Running && "$(backend_state phone)" != NoDaemon \
+    && "$(peer_state resource "$1")" != present ]]
 }
 
 # Revoking the phone cuts its access within seconds, leaves the laptop alone,
@@ -144,6 +157,7 @@ scenario_revoke() {
   hs nodes expire --identifier "$id" >/dev/null
   t0=$(date +%s)
   wait_for 30 phone_gone "$phone_ip" && cut="$(( $(date +%s) - t0 ))s"
+  if ! phone_daemon_alive; then cut="none (phone tailscaled died: not a revocation)"; fi
   if fetch_quiet phone "$ip" "$RESOURCE_PORT" /marker; then cut="none (phone still fetches)"; fi
   verdict "S3 revoke phone cuts its access" \
     "after $cut: phone $(backend_state phone), phone in resource's netmap: $(peer_state resource "$phone_ip"); phone fetch refused" \

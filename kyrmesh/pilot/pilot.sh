@@ -50,12 +50,15 @@ start_resource() {
   wait_for "$WAIT_S" curl -sf "http://127.0.0.1:$OUTSIDE_PORT/marker" || die "outside service did not start"
 }
 
+OWNS_RUN=no # set once this invocation created $RUN: only then may the exit trap tear it down
+
 cmd_up() {
   local p dev key t0
   [[ ! -e "$RUN" ]] || die "$RUN exists: run '$0 down' first"
   for p in $PORTS; do port_free "$p" || die "port $p is in use"; done
   resolve_bins
   mkdir -p "$RUN/hs" "$RUN/nodes" "$RUN/keys" "$RESULTS"
+  OWNS_RUN=yes
   chmod 700 "$RUN" "$RUN/keys"
   : >"$RUN/.kyrmesh-pilot" # down deletes only a directory that carries this mark
   host_snapshot >"$RESULTS/host-before.txt"
@@ -71,7 +74,7 @@ cmd_up() {
   start_resource
   for dev in $DEVICES; do start_device "$dev"; done
   for dev in resource laptop phone outsider; do
-    key=$(new_key "$(owner_of "$dev")" --expiration 10m)
+    key=$(new_key "$(owner_of "$dev")" --expiration 10m) || die "no valid pre-auth key for $dev"
     mv "$key" "$RUN/keys/$dev"
     # `up` can stop waiting after the server already registered the device:
     # look at the device before calling it a failure.
@@ -135,10 +138,13 @@ cmd_down() {
 
 cmd_all() {
   local p busy=""
-  trap cmd_down EXIT # a failed `up` still rolls back; a second `down` is a no-op
+  # A failed `up` of this run still rolls back, but a pilot that was already up
+  # (and made `up` die) is not ours: the trap does nothing then.
+  trap '[[ $OWNS_RUN == yes ]] && cmd_down' EXIT
   cmd_up
   cmd_test || true
   cmd_down
+  OWNS_RUN=no
   for p in $PORTS; do port_free "$p" || busy="$busy $p"; done
   verdict "S5 rollback leaves no process, port or state" "ports still busy:${busy:- none}; $RUN removed: $([[ -e $RUN ]] && echo no || echo yes)" \
     test -z "$busy" -a ! -e "$RUN"
