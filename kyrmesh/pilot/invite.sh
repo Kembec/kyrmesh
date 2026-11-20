@@ -76,10 +76,14 @@ scenario_invite() {
       -a "$(page_marker "$RUN/keys/status.html")" = connected
 
   ip=$(ts_ip resource)
+  # A new device's first WireGuard session takes 15-60 s on this host (S1);
+  # judge the grant once it is open, not on the first try.
+  local t0 opened; t0=$(date +%s)
+  wait_for "$WAIT_S" fetch_quiet tablet "$ip" "$RESOURCE_PORT" /marker && opened="$(( $(date +%s) - t0 ))s" || opened=never
   got=$(fetch tablet "$ip" "$RESOURCE_PORT" /marker 2>/dev/null || true)
   local outside=refused; fetch_quiet tablet "$ip" "$OUTSIDE_PORT" /marker && outside=reached
   verdict "S6 invite: device gets only what its user's policy allows" \
-    "owner $(node_owner tablet); resource:$RESOURCE_PORT $([[ $got == "$(marker)" ]] && echo fetched || echo refused); resource:$OUTSIDE_PORT $outside" \
+    "owner $(node_owner tablet); resource:$RESOURCE_PORT $([[ $got == "$(marker)" ]] && echo fetched || echo refused) (first session after $opened); resource:$OUTSIDE_PORT $outside" \
     test "$(node_owner tablet)" = bob -a "$got" = "$(marker)" -a "$outside" = refused
 
   stop_pidfile "$RUN/nodes/tablet/up.pid"

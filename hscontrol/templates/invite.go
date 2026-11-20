@@ -77,6 +77,8 @@ type InviteConfirmInfo struct {
 	User          string
 	Hostname      string
 	OS            string
+	// ForgetURL drops the stored invitation and continues without it.
+	ForgetURL string
 }
 
 // InviteConfirm asks the person to confirm that the device the app is
@@ -101,6 +103,11 @@ func InviteConfirm(info InviteConfirmInfo) *elem.Element {
 			elem.Button(attrs.Props{attrs.Type: "submit"}, elem.Text("Conectar este dispositivo")),
 		),
 		P(elem.Text("Si no reconoces este dispositivo, cierra esta página: no se conectará nada.")),
+		P(
+			elem.Text("¿No es tu invitación? "),
+			elem.A(attrs.Props{attrs.Href: info.ForgetURL}, elem.Text("Sigue sin ella")),
+			elem.Text("."),
+		),
 	)
 }
 

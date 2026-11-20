@@ -328,3 +328,36 @@ func TestInviteStatusOfAnUnknownDevice(t *testing.T) {
 	assert.Equal(t, http.StatusNotFound, rec.Code)
 	assert.Equal(t, templates.InviteDeviceUnknown, marker(rec.Body.String()))
 }
+
+func TestInviteSwappedBeforeTheClickIsRefused(t *testing.T) {
+	e := newInviteEnv(t)
+	authID := e.pendingDevice("target")
+
+	shown := e.join(e.newKey(false, time.Hour))
+	csrf := e.openConfirm(authID, shown)
+
+	// Another site opens a second invitation in this browser before the click.
+	other := e.app.state.CreateUserForTest("mallory")
+	exp := time.Now().Add(time.Hour)
+	pak, err := e.app.state.CreatePreAuthKey(other.TypedID(), false, false, &exp, nil)
+	require.NoError(t, err)
+
+	swapped := e.join(pak.Key)
+
+	rec := e.confirm(authID, csrf.Value, swapped, csrf)
+	assert.Equal(t, http.StatusForbidden, rec.Code)
+	assert.Equal(t, templates.InviteNotConfirmed, marker(rec.Body.String()))
+	assert.Equal(t, 0, e.app.state.ListNodes().Len(), "the device was confirmed for bob, not for mallory")
+}
+
+func TestInviteForgetGoesBackToTheProviderPage(t *testing.T) {
+	e := newInviteEnv(t)
+	authID := e.pendingDevice("shared-laptop")
+	invite := e.join(e.newKey(false, time.Hour))
+
+	rec := e.get("/join/forget/"+authID.String(), invite)
+
+	assert.Equal(t, http.StatusSeeOther, rec.Code)
+	assert.Equal(t, "/register/"+authID.String(), rec.Header().Get("Location"))
+	assert.Equal(t, -1, cookieNamed(t, rec, inviteCookie).MaxAge)
+}

@@ -79,6 +79,8 @@ the run and results directories is written.
 - In S6 `curl` stands in for the person's browser and a key-less
   `tailscale up` for the app's "Log in" button; the pages and the device are
   real. The Tailscale apps themselves are not driven.
+- The invitation key travels in `?code=`: Headscale's own log records the path
+  only, but a reverse proxy in front may log the query; configure it not to.
 
 ## Invitations
 

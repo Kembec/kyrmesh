@@ -5,11 +5,13 @@ import (
 	"errors"
 	"net/http"
 	"net/url"
+	"strconv"
 	"strings"
 	"time"
 
 	"github.com/hashicorp/golang-lru/v2/expirable"
 	"github.com/juanfont/headscale/hscontrol/db"
+	"github.com/juanfont/headscale/hscontrol/state"
 	"github.com/juanfont/headscale/hscontrol/templates"
 	"github.com/juanfont/headscale/hscontrol/types"
 	"github.com/juanfont/headscale/hscontrol/util"
@@ -35,8 +37,10 @@ const (
 	// A pre-auth key is ~80 characters; anything far longer is not one and
 	// never reaches the database.
 	inviteCodeMaxLen = 256
-	// The cookie never outlives a week, even for a key without expiry.
-	inviteCookieMaxAge = 7 * 24 * time.Hour
+	// Two hours covers installing the app; after that the person opens the
+	// link again. A longer life kept /register showing the invitation's
+	// confirmation for days on that browser (independent review, 20/11).
+	inviteCookieMaxAge = 2 * time.Hour
 	inviteCSRFMaxAge   = 15 * time.Minute
 	// The status page keeps answering for a finished registration this long.
 	inviteDoneTTL  = 15 * time.Minute
@@ -181,13 +185,16 @@ func (f *inviteFlow) RegisterHandler(next http.HandlerFunc) http.HandlerFunc {
 			return
 		}
 
-		csrf, err := util.GenerateRandomStringURLSafe(32)
+		random, err := util.GenerateRandomStringURLSafe(32)
 		if err != nil {
 			httpUserError(w, err)
 
 			return
 		}
 
+		// The token names the key the page showed, so swapping the stored
+		// invitation before the click cannot register with another one.
+		csrf := random + "." + strconv.FormatUint(pak.ID, 10)
 		action := "/join/register/" + authID.String()
 		f.setCookie(w, req, inviteCSRFCookie, action, csrf, inviteCSRFMaxAge)
 
@@ -205,8 +212,24 @@ func (f *inviteFlow) RegisterHandler(next http.HandlerFunc) http.HandlerFunc {
 			User:          inviteOwner(pak),
 			Hostname:      regData.Hostname,
 			OS:            os,
+			ForgetURL:     "/join/forget/" + authID.String(),
 		}))
 	}
+}
+
+// ForgetHandler serves /join/forget/{auth_id}: "this is not my invitation".
+// It drops the stored invitation and sends the browser back to the
+// provider's own /register page.
+func (f *inviteFlow) ForgetHandler(w http.ResponseWriter, req *http.Request) {
+	authID, err := authIDFromRequest(req)
+	if err != nil {
+		httpUserError(w, err)
+
+		return
+	}
+
+	f.clearCookie(w, req, inviteCookie, "/")
+	http.Redirect(w, req, "/register/"+authID.String(), http.StatusSeeOther)
 }
 
 // JoinRegisterHandler serves POST /join/register/{auth_id}: the person
@@ -219,7 +242,8 @@ func (f *inviteFlow) JoinRegisterHandler(w http.ResponseWriter, req *http.Reques
 		return
 	}
 
-	if !f.confirmed(w, req) {
+	token, ok := f.confirmed(w, req)
+	if !ok {
 		renderInvite(w, http.StatusForbidden, templates.InviteError(templates.InviteNotConfirmed))
 
 		return
@@ -231,6 +255,12 @@ func (f *inviteFlow) JoinRegisterHandler(w http.ResponseWriter, req *http.Reques
 	if problem != "" {
 		f.clearCookie(w, req, inviteCookie, "/")
 		renderInvite(w, http.StatusForbidden, templates.InviteError(problem))
+
+		return
+	}
+
+	if !strings.HasSuffix(token, "."+strconv.FormatUint(pak.ID, 10)) {
+		renderInvite(w, http.StatusForbidden, templates.InviteError(templates.InviteNotConfirmed))
 
 		return
 	}
@@ -270,26 +300,27 @@ func (f *inviteFlow) JoinRegisterHandler(w http.ResponseWriter, req *http.Reques
 
 // confirmed checks the POST came from the confirmation page this server
 // rendered: same origin when the browser says it, and the form token equal
-// to its cookie, which is scoped by Path to this auth_id.
-func (f *inviteFlow) confirmed(w http.ResponseWriter, req *http.Request) bool {
+// to its cookie, which is scoped by Path to this auth_id. It returns the
+// token, which also names the key the page showed.
+func (f *inviteFlow) confirmed(w http.ResponseWriter, req *http.Request) (string, bool) {
 	if origin := req.Header.Get("Origin"); origin != "" && !f.sameOrigin(origin) {
-		return false
+		return "", false
 	}
 
 	// The form is one hidden field; 4 KiB keeps ParseForm bounded.
 	req.Body = http.MaxBytesReader(w, req.Body, 4*1024)
 	if err := req.ParseForm(); err != nil { //nolint:noinlineerr,gosec // bounded above
-		return false
+		return "", false
 	}
 
 	form := req.PostFormValue(inviteCSRFCookie) //nolint:gosec // bounded above
 
 	cookie, err := req.Cookie(inviteCSRFCookie)
 	if err != nil || form == "" || cookie.Value == "" {
-		return false
+		return "", false
 	}
 
-	return subtle.ConstantTimeCompare([]byte(form), []byte(cookie.Value)) == 1
+	return form, subtle.ConstantTimeCompare([]byte(form), []byte(cookie.Value)) == 1
 }
 
 func (f *inviteFlow) sameOrigin(origin string) bool {
@@ -312,6 +343,8 @@ func (f *inviteFlow) registerFailed(w http.ResponseWriter, req *http.Request, er
 	var pakErr types.PAKError
 
 	switch {
+	case errors.Is(err, state.ErrInviteNotRegistration):
+		renderInvite(w, http.StatusBadRequest, templates.InviteError(templates.InviteFailed))
 	case errors.Is(err, db.ErrNodeNotFoundRegistrationCache):
 		renderInvite(w, http.StatusGone, templates.InviteError(templates.InviteRequestExpired))
 	case errors.As(err, &pakErr), errors.Is(err, gorm.ErrRecordNotFound):
