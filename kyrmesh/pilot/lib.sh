@@ -22,7 +22,7 @@ owner_of() {
   case "$1" in resource) echo svc ;; laptop) echo alice ;; phone) echo bob ;; outsider) echo mallory ;; *) echo "" ;; esac
 }
 socks_of() {
-  case "$1" in resource) echo 11080 ;; laptop) echo 11081 ;; phone) echo 11082 ;; outsider) echo 11083 ;; intruder) echo 11084 ;; esac
+  case "$1" in resource) echo 11080 ;; laptop) echo 11081 ;; phone) echo 11082 ;; outsider) echo 11083 ;; intruder) echo 11084 ;; tablet) echo 11085 ;; late) echo 11086 ;; esac
 }
 
 die() { printf 'pilot: %s\n' "$*" >&2; exit 1; }

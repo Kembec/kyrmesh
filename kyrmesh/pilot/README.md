@@ -12,8 +12,9 @@ real `tailscaled` devices and real WireGuard sessions, that:
 - the host's own network, including a Tailscale already running on it, is the
   same before, during and after the pilot, and `down` leaves nothing behind.
 
-No Headscale code is changed: the pilot is configuration, a policy and the
-scripts that run it. No mock stands in for a connection.
+The pilot is configuration, a policy and the scripts that run it; the only
+Headscale code it exercises beyond upstream is the invitation flow (S6). No
+mock stands in for a connection.
 
 ## Run it
 
@@ -54,6 +55,7 @@ block states the same intent and `headscale policy check` runs it (S0).
 | S3 | `headscale nodes expire` on `phone` logs it out and makes `resource` treat it as expired (time measured) so its requests fail; `laptop` keeps access; after `nodes delete`, the used single-use key cannot bring `phone` back (`already used`) |
 | S4 | interfaces, default and tunnel routes, resolvers and the host Tailscale state are identical before, during and after |
 | S5 | after `down`, no pilot process or port remains and the run directory, with every key, is gone |
+| S6 | a new device joins from an invitation link with no terminal and gets only its user's grant; the same link a second time, an expired link and one revoked after it was opened are refused, and the device behind the last never joins |
 
 ## Rollback
 
@@ -74,7 +76,28 @@ the run and results directories is written.
 - `up` opens each client's first WireGuard session before the scenarios run
   and records how long it took; on a heavily loaded host it can exceed the
   5 s a first request would otherwise wait.
-- Invitation without a terminal is a separate deliverable.
+- In S6 `curl` stands in for the person's browser and a key-less
+  `tailscale up` for the app's "Log in" button; the pages and the device are
+  real. The Tailscale apps themselves are not driven.
+
+## Invitations
+
+An invitation is a single-use pre-auth key handed out as a link, so the
+person never types a key or a command:
+
+```sh
+headscale invites create --user <id> --expiration 24h   # prints <server_url>/join?code=…
+headscale preauthkeys expire --id <id>                  # revokes it
+```
+
+The person opens the link in Safari or Chrome on the device to connect,
+installs Tailscale, points it at the server (the `/apple` profile on iPhone,
+iPad and Mac; "Use an alternate server" on Android) and taps "Log in". The
+app opens `/register/{auth_id}`, the page asks them to confirm, and the device
+registers with the invitation's key: its user, tags, expiry and single use
+decide everything, exactly as with `--auth-key`. `/join/status/{auth_id}` then
+says whether it is connected. Windows still needs a command: its app has no
+alternate-server option on screen.
 
 ## Origin
 

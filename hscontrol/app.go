@@ -108,6 +108,7 @@ type Headscale struct {
 	// Things that generate changes
 	extraRecordMan *dns.ExtraRecordsMan
 	authProvider   AuthProvider
+	invites        *inviteFlow
 	mapBatcher     *mapper.Batcher
 
 	clientStreamsOpen sync.WaitGroup
@@ -214,6 +215,7 @@ func NewHeadscale(cfg *types.Config) (*Headscale, error) {
 	}
 
 	app.authProvider = authProvider
+	app.invites = newInviteFlow(&app, cfg.ServerURL)
 
 	if app.cfg.TailcfgDNSConfig != nil && app.cfg.TailcfgDNSConfig.Proxied { // if MagicDNS
 		// TODO(kradalby): revisit why this takes a list.
@@ -571,7 +573,11 @@ func (h *Headscale) createRouter(grpcMux *grpcRuntime.ServeMux) *chi.Mux {
 	r.Get("/health", h.HealthHandler)
 	r.Get("/version", h.VersionHandler)
 	r.Get("/key", h.KeyHandler)
-	r.Get("/register/{auth_id}", h.authProvider.RegisterHandler)
+	// An invitation in the browser turns /register into its confirmation (KEM-456).
+	r.Get("/register/{auth_id}", h.invites.RegisterHandler(h.authProvider.RegisterHandler))
+	r.Get("/join", h.invites.JoinHandler)
+	r.Post("/join/register/{auth_id}", h.invites.JoinRegisterHandler)
+	r.Get("/join/status/{auth_id}", h.invites.JoinStatusHandler)
 	r.Get("/auth/{auth_id}", h.authProvider.AuthHandler)
 
 	if provider, ok := h.authProvider.(*AuthProviderOIDC); ok {

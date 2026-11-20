@@ -15,10 +15,11 @@ set -euo pipefail
 . "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
 # shellcheck source=kyrmesh/pilot/scenarios.sh
 . "$PILOT_DIR/scenarios.sh"
+. "$PILOT_DIR/invite.sh"
 # shellcheck source=kyrmesh/pilot/host.sh
 . "$PILOT_DIR/host.sh"
 
-PORTS="$HS_PORT $HS_METRICS_PORT $HS_GRPC_PORT $RESOURCE_PORT $OUTSIDE_PORT 11080 11081 11082 11083 11084"
+PORTS="$HS_PORT $HS_METRICS_PORT $HS_GRPC_PORT $RESOURCE_PORT $OUTSIDE_PORT 11080 11081 11082 11083 11084 11085 11086"
 
 resolve_bins() {
   need curl python3
@@ -118,6 +119,7 @@ cmd_test() {
   scenario_deny_device
   scenario_unauthorized
   scenario_revoke
+  scenario_invite
   host_snapshot >"$RESULTS/host-during.txt"
   verdict "S4 host network unchanged while the pilot runs" "$(host_diff host-before.txt host-during.txt)" \
     host_same host-before.txt host-during.txt
