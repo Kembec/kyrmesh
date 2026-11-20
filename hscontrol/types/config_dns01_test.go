@@ -53,3 +53,27 @@ func TestValidateDNS01(t *testing.T) {
 		})
 	}
 }
+
+// The server, not the CLI, serves routes: hide_fingerprint must reach the
+// config LoadServerConfig returns (it was only read for the CLI, review 20/11).
+func TestServerConfigReadsHideFingerprint(t *testing.T) {
+	for _, want := range []bool{true, false} {
+		viper.Reset()
+		t.Cleanup(viper.Reset)
+
+		if err := LoadConfig("testdata/base-domain-not-in-server-url.yaml", true); err != nil { //nolint:noinlineerr
+			t.Fatal(err)
+		}
+
+		viper.Set("hide_fingerprint", want)
+
+		cfg, err := LoadServerConfig()
+		if err != nil {
+			t.Fatal(err)
+		}
+
+		if cfg.HideFingerprint != want {
+			t.Fatalf("HideFingerprint = %v, want %v", cfg.HideFingerprint, want)
+		}
+	}
+}

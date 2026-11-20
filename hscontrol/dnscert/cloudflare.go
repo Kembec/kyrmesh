@@ -16,6 +16,10 @@ import (
 // DefaultCloudflareAPI is Cloudflare's v4 API base URL.
 const DefaultCloudflareAPI = "https://api.cloudflare.com/client/v4"
 
+// challengeComment marks the records this package creates, so CleanTXT
+// only ever removes its own.
+const challengeComment = "ACME challenge, removed after validation"
+
 // Cloudflare publishes and removes the ACME TXT records through the
 // Cloudflare API. The token is read from a file on every call and never
 // appears in an error or a log line: it can edit the zone's DNS.
@@ -165,13 +169,42 @@ func (c *Cloudflare) SetTXT(ctx context.Context, name, value string) (string, er
 		"name":    name,
 		"content": value,
 		"ttl":     60,
-		"comment": "ACME challenge, removed after validation",
+		"comment": challengeComment,
 	}, &rec)
 	if err != nil {
 		return "", err
 	}
 
 	return rec.ID, nil
+}
+
+// CleanTXT removes the TXT records for name that carry this package's mark.
+func (c *Cloudflare) CleanTXT(ctx context.Context, name string) error {
+	zone, err := c.zone(ctx)
+	if err != nil {
+		return err
+	}
+
+	var recs []struct {
+		ID      string `json:"id"`
+		Comment string `json:"comment"`
+	}
+
+	if err := c.call(ctx, http.MethodGet, "/zones/"+zone+"/dns_records?type=TXT&name="+url.QueryEscape(name), nil, &recs); err != nil { //nolint:noinlineerr
+		return err
+	}
+
+	for _, r := range recs {
+		if r.Comment != challengeComment {
+			continue
+		}
+
+		if err := c.DeleteRecord(ctx, r.ID); err != nil { //nolint:noinlineerr
+			return err
+		}
+	}
+
+	return nil
 }
 
 // DeleteRecord removes a record created by SetTXT.

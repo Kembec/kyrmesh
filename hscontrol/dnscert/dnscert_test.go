@@ -9,6 +9,7 @@ import (
 	"crypto/x509"
 	"crypto/x509/pkix"
 	"encoding/json"
+	"errors"
 	"io"
 	"math/big"
 	"net/http"
@@ -147,7 +148,7 @@ func TestCachedCertificateForAnotherNameIsIgnored(t *testing.T) {
 		t.Fatal("a certificate for another wildcard must not be served")
 	}
 
-	for _, f := range []string{certFile, keyFile} {
+	for _, f := range []string{pairFile} {
 		info, err := os.Stat(filepath.Join(dir, f))
 		if err != nil {
 			t.Fatal(err)
@@ -183,6 +184,8 @@ func (f *fakeCloudflare) handler() http.Handler {
 		case r.Method == http.MethodPost && r.URL.Path == "/zones/zone123/dns_records":
 			_ = json.NewDecoder(r.Body).Decode(&f.created)
 			_, _ = io.WriteString(w, `{"success":true,"result":{"id":"rec456"}}`)
+		case r.Method == http.MethodGet && r.URL.Path == "/zones/zone123/dns_records":
+			_, _ = io.WriteString(w, `{"success":true,"result":[{"id":"old1","comment":"`+challengeComment+`"},{"id":"human","comment":"site verification"}]}`)
 		case r.Method == http.MethodDelete && strings.HasPrefix(r.URL.Path, "/zones/zone123/dns_records/"):
 			f.deleted = append(f.deleted, strings.TrimPrefix(r.URL.Path, "/zones/zone123/dns_records/"))
 			_, _ = io.WriteString(w, `{"success":true,"result":{}}`)
@@ -254,5 +257,49 @@ func TestCloudflareErrorsNeverCarryTheToken(t *testing.T) {
 
 	if !strings.Contains(err.Error(), "Authentication error") {
 		t.Fatalf("error hides Cloudflare's reason: %v", err)
+	}
+}
+
+func TestCleanTXTRemovesOnlyItsOwnRecords(t *testing.T) {
+	cf, fake := newFakeClient(t)
+
+	if err := cf.CleanTXT(context.Background(), "_acme-challenge.z.example.com"); err != nil {
+		t.Fatal(err)
+	}
+
+	if len(fake.deleted) != 1 || fake.deleted[0] != "old1" {
+		t.Fatalf("deleted %v; a record without the mark must stay", fake.deleted)
+	}
+}
+
+func TestAnUnreadableAccountKeyIsNeverReplaced(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, accountKeyFile)
+
+	// A directory in its place: reading fails with something other than "not found".
+	if err := os.Mkdir(path, 0o700); err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := loadOrCreateKey(path); err == nil {
+		t.Fatal("expected an error instead of a new key")
+	}
+
+	info, err := os.Stat(path)
+	if err != nil || !info.IsDir() {
+		t.Fatal("the unreadable key was replaced")
+	}
+}
+
+func TestARecentOrderBlocksAnotherOne(t *testing.T) {
+	m := newTestManager(t)
+
+	if err := writeFile(filepath.Join(m.cfg.CacheDir, attemptFile), []byte("x\n")); err != nil {
+		t.Fatal(err)
+	}
+
+	// Without the guard this would reach the CA: a restart loop reissuing.
+	if err := m.obtain(context.Background()); !errors.Is(err, errOrderTooSoon) {
+		t.Fatalf("obtain = %v, want errOrderTooSoon", err)
 	}
 }

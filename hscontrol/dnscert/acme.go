@@ -23,18 +23,35 @@ import (
 
 const (
 	accountKeyFile = "account.key"
-	certFile       = "wildcard.crt"
-	keyFile        = "wildcard.key"
+	// Chain and key in one file, written in one rename: a crash can never
+	// leave a key that does not match its certificate (review, 20/11).
+	pairFile = "wildcard.pem"
+	// Mark of the last order: a restart loop must not reissue (5 duplicate
+	// certificates per week lock the name out).
+	attemptFile = "last-order"
+	minOrderGap = time.Hour
 	// Cloudflare publishes a record in seconds; the wait covers a slow edge.
 	propagationTimeout = 3 * time.Minute
 )
 
-var errNoDNS01 = errors.New("authorization offers no dns-01 challenge")
+var (
+	errNoDNS01      = errors.New("authorization offers no dns-01 challenge")
+	errOrderTooSoon = errors.New("last order was less than an hour ago")
+)
 
 // obtain runs one DNS-01 order for the wildcard and installs the result.
 func (m *Manager) obtain(ctx context.Context) error {
 	if err := os.MkdirAll(m.cfg.CacheDir, 0o700); err != nil { //nolint:noinlineerr
 		return fmt.Errorf("creating cache dir: %w", err)
+	}
+
+	mark := filepath.Join(m.cfg.CacheDir, attemptFile)
+	if info, err := os.Stat(mark); err == nil && m.now().Sub(info.ModTime()) < minOrderGap {
+		return errOrderTooSoon
+	}
+
+	if err := writeFile(mark, []byte(m.now().UTC().Format(time.RFC3339)+"\n")); err != nil { //nolint:noinlineerr
+		return err
 	}
 
 	accountKey, err := loadOrCreateKey(filepath.Join(m.cfg.CacheDir, accountKeyFile))
@@ -84,13 +101,24 @@ func (m *Manager) obtain(ctx context.Context) error {
 		return fmt.Errorf("finalizing order: %w", err)
 	}
 
-	cert, err := storeCert(m.cfg.CacheDir, chain, certKey)
+	pairPEM, err := encodePair(chain, certKey)
 	if err != nil {
 		return err
 	}
 
+	cert, err := parsePair(pairPEM)
+	if err != nil {
+		return err
+	}
+
+	// Serve it even if the cache write fails: reissuing for that would burn
+	// the weekly duplicate limit (review, 20/11).
 	m.set(cert)
 	log.Info().Time("not_after", cert.Leaf.NotAfter).Msg("dnscert: certificate obtained")
+
+	if err := writeFile(filepath.Join(m.cfg.CacheDir, pairFile), pairPEM); err != nil { //nolint:noinlineerr
+		log.Error().Err(err).Msg("dnscert: caching certificate; it is served from memory until the next restart")
+	}
 
 	return nil
 }
@@ -120,6 +148,11 @@ func (m *Manager) authorize(ctx context.Context, client *acme.Client, authzURL s
 	}
 
 	fqdn := "_acme-challenge." + authz.Identifier.Value
+
+	// A record left by a lost response would otherwise stay published.
+	if err := m.dns.CleanTXT(ctx, fqdn); err != nil { //nolint:noinlineerr
+		log.Warn().Err(err).Str("record", fqdn).Msg("dnscert: removing stale dns-01 records")
+	}
 
 	recordID, err := m.dns.SetTXT(ctx, fqdn, value)
 	if err != nil {
@@ -178,13 +211,20 @@ func waitForTXT(ctx context.Context, fqdn, value string) error {
 }
 
 func loadOrCreateKey(path string) (*ecdsa.PrivateKey, error) {
-	if raw, err := os.ReadFile(path); err == nil {
+	raw, err := os.ReadFile(path)
+	if err == nil {
 		block, _ := pem.Decode(raw)
 		if block == nil {
 			return nil, fmt.Errorf("%s holds no PEM block", path)
 		}
 
 		return x509.ParseECPrivateKey(block.Bytes)
+	}
+
+	// Only a missing key is created: any other error must not replace the
+	// account key (review, 20/11).
+	if !errors.Is(err, os.ErrNotExist) {
+		return nil, fmt.Errorf("reading account key: %w", err)
 	}
 
 	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
@@ -204,11 +244,11 @@ func loadOrCreateKey(path string) (*ecdsa.PrivateKey, error) {
 	return key, nil
 }
 
-// storeCert writes chain and key atomically and returns the parsed pair.
-func storeCert(dir string, chain [][]byte, key *ecdsa.PrivateKey) (*tls.Certificate, error) {
-	var certPEM []byte
+// encodePair is the chain followed by its key, as one PEM document.
+func encodePair(chain [][]byte, key *ecdsa.PrivateKey) ([]byte, error) {
+	var out []byte
 	for _, der := range chain {
-		certPEM = append(certPEM, pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: der})...)
+		out = append(out, pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: der})...)
 	}
 
 	der, err := x509.MarshalECPrivateKey(key)
@@ -216,32 +256,31 @@ func storeCert(dir string, chain [][]byte, key *ecdsa.PrivateKey) (*tls.Certific
 		return nil, fmt.Errorf("encoding certificate key: %w", err)
 	}
 
-	keyPEM := pem.EncodeToMemory(&pem.Block{Type: "EC PRIVATE KEY", Bytes: der})
+	return append(out, pem.EncodeToMemory(&pem.Block{Type: "EC PRIVATE KEY", Bytes: der})...), nil
+}
 
-	if err := writeFile(filepath.Join(dir, keyFile), keyPEM); err != nil { //nolint:noinlineerr
+// storeCert writes chain and key in one file and returns the parsed pair.
+func storeCert(dir string, chain [][]byte, key *ecdsa.PrivateKey) (*tls.Certificate, error) {
+	data, err := encodePair(chain, key)
+	if err != nil {
 		return nil, err
 	}
 
-	if err := writeFile(filepath.Join(dir, certFile), certPEM); err != nil { //nolint:noinlineerr
+	if err := writeFile(filepath.Join(dir, pairFile), data); err != nil { //nolint:noinlineerr
 		return nil, err
 	}
 
-	return parsePair(certPEM, keyPEM)
+	return parsePair(data)
 }
 
 // loadCached returns the cached pair if it is for this wildcard.
 func loadCached(dir, wildcard string) (*tls.Certificate, error) {
-	certPEM, err := os.ReadFile(filepath.Join(dir, certFile))
+	data, err := os.ReadFile(filepath.Join(dir, pairFile))
 	if err != nil {
 		return nil, err
 	}
 
-	keyPEM, err := os.ReadFile(filepath.Join(dir, keyFile))
-	if err != nil {
-		return nil, err
-	}
-
-	cert, err := parsePair(certPEM, keyPEM)
+	cert, err := parsePair(data)
 	if err != nil {
 		return nil, err
 	}
@@ -253,8 +292,9 @@ func loadCached(dir, wildcard string) (*tls.Certificate, error) {
 	return cert, nil
 }
 
-func parsePair(certPEM, keyPEM []byte) (*tls.Certificate, error) {
-	pair, err := tls.X509KeyPair(certPEM, keyPEM)
+// parsePair reads the certificates and the key from one PEM document.
+func parsePair(data []byte) (*tls.Certificate, error) {
+	pair, err := tls.X509KeyPair(data, data)
 	if err != nil {
 		return nil, fmt.Errorf("parsing certificate pair: %w", err)
 	}

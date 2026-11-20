@@ -19,12 +19,15 @@ import (
 	"time"
 
 	"github.com/rs/zerolog/log"
+	"golang.org/x/crypto/acme"
 )
 
 // TXTProvider publishes the DNS-01 TXT record and removes it afterwards.
 type TXTProvider interface {
 	SetTXT(ctx context.Context, name, value string) (string, error)
 	DeleteRecord(ctx context.Context, id string) error
+	// CleanTXT removes TXT records for name that this package left behind.
+	CleanTXT(ctx context.Context, name string) error
 }
 
 // Config is what the manager needs; it holds no secret.
@@ -150,8 +153,17 @@ func (m *Manager) loop(ctx context.Context) {
 
 		if m.needsRenewal() {
 			if err := m.obtain(ctx); err != nil {
-				log.Error().Err(err).Dur("retry_in", retry).Msg("dnscert: obtaining certificate")
 				next = retry
+				// The CA's own wait wins over ours (Retry-After on a rate limit).
+				if wait, ok := acme.RateLimit(err); ok {
+					next = max(next, wait)
+				}
+
+				if errors.Is(err, errOrderTooSoon) {
+					next = max(next, minOrderGap)
+				}
+
+				log.Error().Err(err).Dur("retry_in", next).Msg("dnscert: obtaining certificate")
 				retry = min(retry*2, retryMax)
 			} else {
 				retry = retryInitial

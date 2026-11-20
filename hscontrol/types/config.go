@@ -1163,7 +1163,6 @@ func LoadCLIConfig() (*Config, error) {
 
 	return &Config{
 		DisableUpdateCheck: viper.GetBool("disable_check_updates"),
-		HideFingerprint:    viper.GetBool("hide_fingerprint"),
 		UnixSocket:         viper.GetString("unix_socket"),
 		CLI: CLIConfig{
 			Address:  viper.GetString("cli.address"),
@@ -1292,6 +1291,8 @@ func LoadServerConfig() (*Config, error) {
 		GRPCAllowInsecure:  viper.GetBool("grpc_allow_insecure"),
 		TrustedProxies:     trusted,
 		DisableUpdateCheck: false,
+		// Read here, by the server: the CLI never serves routes (review, 20/11).
+		HideFingerprint: viper.GetBool("hide_fingerprint"),
 
 		PrefixV4:     prefix4,
 		PrefixV6:     prefix6,
