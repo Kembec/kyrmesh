@@ -571,7 +571,9 @@ func (h *Headscale) createRouter(grpcMux *grpcRuntime.ServeMux) *chi.Mux {
 
 	r.Get("/robots.txt", h.RobotsHandler)
 	r.Get("/health", h.HealthHandler)
-	r.Get("/version", h.VersionHandler)
+	if !h.cfg.HideFingerprint {
+		r.Get("/version", h.VersionHandler)
+	}
 	r.Get("/key", h.KeyHandler)
 	// An invitation in the browser turns /register into its confirmation (KEM-456).
 	r.Get("/register/{auth_id}", h.invites.RegisterHandler(h.authProvider.RegisterHandler))
@@ -592,8 +594,10 @@ func (h *Headscale) createRouter(grpcMux *grpcRuntime.ServeMux) *chi.Mux {
 	r.Get("/windows", h.WindowsConfigMessage)
 
 	// TODO(kristoffer): move swagger into a package
-	r.Get("/swagger", headscale.SwaggerUI)
-	r.Get("/swagger/v1/openapiv2.json", headscale.SwaggerAPIv1)
+	if !h.cfg.HideFingerprint {
+		r.Get("/swagger", headscale.SwaggerUI)
+		r.Get("/swagger/v1/openapiv2.json", headscale.SwaggerAPIv1)
+	}
 
 	r.Post("/verify", h.VerifyHandler)
 
@@ -1054,6 +1058,10 @@ func (h *Headscale) Serve() error {
 
 func (h *Headscale) getTLSSettings() (*tls.Config, error) {
 	var err error
+
+	if h.cfg.TLS.DNS01.Wildcard != "" {
+		return h.dns01TLSConfig()
+	}
 
 	if h.cfg.TLS.LetsEncrypt.Hostname != "" {
 		if !strings.HasPrefix(h.cfg.ServerURL, "https://") {
