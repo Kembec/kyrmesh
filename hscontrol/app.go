@@ -1442,9 +1442,10 @@ func (h *Headscale) apiHandlers() (http.Handler, http.Handler, http.Handler) {
 		})
 
 		h.apiV0 = apiv0.Handler(apiv0.Backend{
-			State:  h.state,
-			Change: h.Change,
-			Cfg:    h.cfg,
+			State:     h.state,
+			Change:    h.Change,
+			Cfg:       h.cfg,
+			Connected: h.isConnected,
 		})
 	})
 
