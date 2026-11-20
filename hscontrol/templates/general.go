@@ -157,7 +157,13 @@ var listStyle = styles.Props{
 // Styling is provided via a CSS stylesheet (Material for MkDocs design system) with
 // minimal inline styles for layout and positioning.
 func HtmlStructure(head, body *elem.Element) *elem.Element {
-	return elem.Html(attrs.Props{attrs.Lang: "en"},
+	return HtmlStructureLang("en", head, body)
+}
+
+// HtmlStructureLang is [HtmlStructure] for a page written in another
+// language, so screen readers and translators read it in the right one.
+func HtmlStructureLang(lang string, head, body *elem.Element) *elem.Element {
+	return elem.Html(attrs.Props{attrs.Lang: lang},
 		elem.Head(nil,
 			elem.Meta(attrs.Props{
 				attrs.Charset: "UTF-8",
