@@ -34,8 +34,10 @@ const (
 	waitingTTL    = 10 * time.Minute
 	waitingSize   = 1024
 	// Codes are 4 digits; after this many wrong ones from an address, pairing
-	// from it stops until its waits expire, so guessing a neighbour's device
-	// on a shared network is 5 tries in 9000.
+	// from it stops until its waits expire. A device that pairs from that
+	// address clears its count, so the cap that always holds is the one per
+	// invitation (pairMaxWrongPerInvite): at most 20 tries in 9000 per
+	// invitation and window.
 	pairMaxWrong = 5
 )
 
