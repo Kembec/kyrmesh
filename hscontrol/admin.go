@@ -83,18 +83,65 @@ func newAdminConsole(h *Headscale, serverURL string) *adminConsole {
 // routes mounts the console. Only the login link is reachable without a
 // session, and it needs a live admin link.
 func (a *adminConsole) routes(r chi.Router) {
-	r.Get(types.AdminLoginPath, a.LoginHandler)
+	r.Get(types.AdminLoginPath, a.LoginConfirmHandler)
+	r.Post(types.AdminLoginPath, a.LoginHandler)
 	r.Get(adminPath, a.authed(a.page))
 	r.Post(adminPath+"/invites", a.posted(a.create))
 	r.Post(adminPath+"/invites/{id}/revoke", a.posted(a.revoke))
 	r.Post(adminPath+"/logout", a.posted(a.logout))
 }
 
-// LoginHandler serves /admin/login?code=<api key>: it spends the key and
-// starts a session, then redirects to the bare console so the key does not
-// stay in the address bar or the browser history.
+// LoginConfirmHandler serves GET /admin/login?code=<api key>. It only shows
+// a one-button form and spends nothing: link previewers (chat apps, mail
+// scanners) fetch links before the administrator does, and must not burn the
+// key or receive a session. Like /join, the key is spent by a POST.
+func (a *adminConsole) LoginConfirmHandler(w http.ResponseWriter, req *http.Request) {
+	code := req.URL.Query().Get(types.InviteCodeParam)
+	if !wellFormedAdminCode(code) || a.liveKey(code) == nil {
+		renderAdmin(w, http.StatusForbidden, templates.AdminDenied(templates.AdminLinkInvalid))
+
+		return
+	}
+
+	renderAdmin(w, http.StatusOK, templates.AdminLoginConfirm(types.AdminLoginPath, types.InviteCodeParam, code))
+}
+
+// wellFormedAdminCode filters what is echoed into the confirmation form:
+// the key prefix, a bounded length and only the characters an API key has.
+func wellFormedAdminCode(code string) bool {
+	if len(code) > adminCodeMaxLen || !strings.HasPrefix(code, adminKeyPrefix) {
+		return false
+	}
+
+	for _, r := range code {
+		isKeyChar := r == '-' || r == '_' || r == '.' ||
+			(r >= '0' && r <= '9') || (r >= 'a' && r <= 'z') || (r >= 'A' && r <= 'Z')
+		if !isKeyChar {
+			return false
+		}
+	}
+
+	return true
+}
+
+// LoginHandler serves POST /admin/login: it spends the key and starts a
+// session, then redirects to the bare console so the key does not stay in
+// the address bar or the browser history.
 func (a *adminConsole) LoginHandler(w http.ResponseWriter, req *http.Request) {
-	if !a.burn(req.URL.Query().Get(types.InviteCodeParam)) {
+	if origin := req.Header.Get("Origin"); origin != "" && origin != "null" && !sameOriginAs(a.serverURL, origin) {
+		renderAdmin(w, http.StatusForbidden, templates.AdminDenied(templates.AdminBadForm))
+
+		return
+	}
+
+	req.Body = http.MaxBytesReader(w, req.Body, adminFormMaxBytes)
+	if err := req.ParseForm(); err != nil { //nolint:noinlineerr,gosec // bounded above
+		renderAdmin(w, http.StatusBadRequest, templates.AdminDenied(templates.AdminBadForm))
+
+		return
+	}
+
+	if !a.burn(req.PostFormValue(types.InviteCodeParam)) {
 		renderAdmin(w, http.StatusForbidden, templates.AdminDenied(templates.AdminLinkInvalid))
 
 		return
@@ -112,28 +159,40 @@ func (a *adminConsole) LoginHandler(w http.ResponseWriter, req *http.Request) {
 	http.Redirect(w, req, adminPath, http.StatusSeeOther)
 }
 
-// burn reports whether code is a live admin link, and expires it.
-func (a *adminConsole) burn(code string) bool {
+// liveKey returns the key when code would be accepted as an admin link
+// (prefix, still valid, bounded life), and spends nothing. It is the single
+// set of conditions shared by the GET check and the POST that burns.
+func (a *adminConsole) liveKey(code string) *types.APIKey {
 	if len(code) > adminCodeMaxLen || !strings.HasPrefix(code, adminKeyPrefix) {
-		return false
+		return nil
 	}
-
-	a.burnMu.Lock()
-	defer a.burnMu.Unlock()
 
 	ok, err := a.h.state.ValidateAPIKey(code)
 	if err != nil || !ok {
-		return false
+		return nil
 	}
 
 	key, err := a.h.state.GetAPIKey(code)
 	if err != nil || key.CreatedAt == nil || key.Expiration == nil {
-		return false
+		return nil
 	}
 
 	// Expiring sets Expiration to now, so a second request with the same
 	// link fails here even within the same clock tick.
 	if !key.Expiration.After(time.Now()) || key.Expiration.Sub(*key.CreatedAt) > adminLinkMaxLife {
+		return nil
+	}
+
+	return key
+}
+
+// burn reports whether code is a live admin link, and expires it.
+func (a *adminConsole) burn(code string) bool {
+	a.burnMu.Lock()
+	defer a.burnMu.Unlock()
+
+	key := a.liveKey(code)
+	if key == nil {
 		return false
 	}
 

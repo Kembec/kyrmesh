@@ -36,11 +36,26 @@ func (e *inviteEnv) adminLogin() *http.Cookie {
 	e.t.Helper()
 
 	_, link := e.adminLink(types.AdminLinkLife)
-	rec := e.get(link)
+	rec := e.adminOpen(link)
 	require.Equal(e.t, http.StatusSeeOther, rec.Code, rec.Body.String())
 	require.Equal(e.t, adminPath, rec.Header().Get("Location"))
 
 	return cookieNamed(e.t, rec, adminCookie)
+}
+
+// adminOpen does what the administrator's browser does with a login link:
+// GET it, then press the button, which POSTs the key from the form.
+func (e *inviteEnv) adminOpen(link string) *httptest.ResponseRecorder {
+	e.t.Helper()
+
+	page := e.get(link)
+	if page.Code != http.StatusOK {
+		return page
+	}
+
+	require.Equal(e.t, "admin-login-confirm", marker(page.Body.String()))
+
+	return e.adminPost(types.AdminLoginPath, url.Values{types.InviteCodeParam: {attrOf(e.t, page.Body.String(), types.InviteCodeParam)}})
 }
 
 func (e *inviteEnv) adminPost(path string, form url.Values, cookies ...*http.Cookie) *httptest.ResponseRecorder {
@@ -100,20 +115,32 @@ func TestAdminLinkOpensOneSessionOnly(t *testing.T) {
 
 	key, link := e.adminLink(types.AdminLinkLife)
 
-	first := e.get(link)
+	// A previewer that only GETs the link spends nothing and gets no session.
+	for range 3 {
+		preview := e.get(link)
+		require.Equal(t, http.StatusOK, preview.Code)
+		assert.Equal(t, "admin-login-confirm", marker(preview.Body.String()))
+		assert.Empty(t, preview.Result().Cookies(), "a GET must not start a session")
+	}
+
+	valid, err := e.app.state.ValidateAPIKey(key)
+	require.NoError(t, err)
+	assert.True(t, valid, "a GET must not spend the key")
+
+	first := e.adminOpen(link)
 	require.Equal(t, http.StatusSeeOther, first.Code)
 	session := cookieNamed(t, first, adminCookie)
 	assert.True(t, session.HttpOnly)
 	assert.Equal(t, adminPath, session.Path)
 
-	second := e.get(link)
+	second := e.adminOpen(link)
 	assert.Equal(t, http.StatusForbidden, second.Code)
 	assert.Equal(t, templates.AdminLinkInvalid, marker(second.Body.String()))
 	assert.Empty(t, second.Result().Cookies(), "a spent link must not start a session")
 
-	valid, err := e.app.state.ValidateAPIKey(key)
+	valid, err = e.app.state.ValidateAPIKey(key)
 	require.NoError(t, err)
-	assert.False(t, valid, "opening the link spends its API key")
+	assert.False(t, valid, "the POST spends its API key")
 
 	e.adminConsole(session)
 }
@@ -122,7 +149,8 @@ func TestAdminLinkRaceGivesOneSession(t *testing.T) {
 	t.Parallel()
 	e := newInviteEnv(t)
 
-	_, link := e.adminLink(types.AdminLinkLife)
+	key, _ := e.adminLink(types.AdminLinkLife)
+	form := url.Values{types.InviteCodeParam: {key}}.Encode()
 
 	var (
 		wg   sync.WaitGroup
@@ -132,8 +160,11 @@ func TestAdminLinkRaceGivesOneSession(t *testing.T) {
 
 	for range 8 {
 		wg.Go(func() {
+			req := httptest.NewRequestWithContext(context.Background(), http.MethodPost, types.AdminLoginPath, strings.NewReader(form))
+			req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+
 			rec := httptest.NewRecorder()
-			e.router.ServeHTTP(rec, httptest.NewRequestWithContext(context.Background(), http.MethodGet, link, nil))
+			e.router.ServeHTTP(rec, req)
 
 			if rec.Code == http.StatusSeeOther {
 				mu.Lock()
@@ -153,7 +184,7 @@ func TestAdminLinkRefusesOtherKeys(t *testing.T) {
 
 	// A key made for a REST client is not an admin link and is not burned.
 	key, link := e.adminLink(90 * 24 * time.Hour)
-	rec := e.get(link)
+	rec := e.adminOpen(link)
 	assert.Equal(t, http.StatusForbidden, rec.Code)
 	assert.Equal(t, templates.AdminLinkInvalid, marker(rec.Body.String()))
 
@@ -306,4 +337,55 @@ func TestUntilText(t *testing.T) {
 	} {
 		assert.Equal(t, want, templates.UntilText(now.Add(d+2*time.Second)), d.String())
 	}
+}
+
+func TestAdminLoginPostRefusesForeignOrigin(t *testing.T) {
+	t.Parallel()
+	e := newInviteEnv(t)
+
+	key, _ := e.adminLink(types.AdminLinkLife)
+	req := httptest.NewRequestWithContext(context.Background(), http.MethodPost, types.AdminLoginPath,
+		strings.NewReader(url.Values{types.InviteCodeParam: {key}}.Encode()))
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	req.Header.Set("Origin", "https://elsewhere.invalid")
+
+	rec := e.do(req)
+	assert.Equal(t, http.StatusForbidden, rec.Code)
+
+	valid, err := e.app.state.ValidateAPIKey(key)
+	require.NoError(t, err)
+	assert.True(t, valid, "a refused POST must not spend the key")
+}
+
+func TestAdminPageEscapesHostileNames(t *testing.T) {
+	t.Parallel()
+
+	hostile := `<script>alert("x")</script>' & "q"`
+	page := templates.AdminPage(templates.AdminPageInfo{
+		CSRFField: "csrf",
+		CSRFToken: "t",
+		Share: &templates.AdminShareInfo{
+			Link:    `https://example.invalid/join?code=a<script>"b'`,
+			Owner:   hostile,
+			Expires: time.Now().Add(time.Hour),
+		},
+		Pending: []templates.AdminPendingInfo{{Owner: hostile, RevokeAction: "/admin/invites/1/revoke"}},
+	}).Render()
+
+	// The name is text: escaped in the success box and in the pending list.
+	assert.Contains(t, page, "Invitación lista para &lt;script&gt;")
+	assert.NotContains(t, page, "<script>alert")
+
+	// Whatever reaches the share links is percent-encoded, never raw.
+	for _, prefix := range []string{"https://wa.me/?text=", "mailto:?subject="} {
+		_, rest, ok := strings.Cut(page, `href="`+prefix)
+		require.True(t, ok, prefix)
+
+		href, _, _ := strings.Cut(rest, `"`)
+		for _, raw := range []string{"<", ">", "'", " ", "\n"} {
+			assert.NotContains(t, href, raw, prefix)
+		}
+	}
+
+	assert.Contains(t, page, "%3Cscript%3E")
 }

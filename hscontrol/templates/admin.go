@@ -1,6 +1,7 @@
 package templates
 
 import (
+	"html"
 	"net/url"
 	"strconv"
 	"strings"
@@ -90,7 +91,8 @@ func AdminPage(info AdminPageInfo) *elem.Element {
 	children = append(children,
 		adminCreateForm(info),
 		adminPendingList(info),
-		adminForm(info.LogoutAction, info, nil, adminQuietButton("Cerrar sesión")),
+		elem.Div(attrs.Props{attrs.Style: styles.Props{styles.MarginTop: spaceXL}.ToInline()},
+			adminForm(info.LogoutAction, info, nil, adminQuietButton("Cerrar sesión"))),
 	)
 
 	return adminLayout("Invitaciones", "admin-console", children...)
@@ -190,6 +192,17 @@ var adminDenials = map[string][2]string{
 		"Vuelve a la página de invitaciones y repite la acción."},
 	AdminFailed: {"Algo falló en el servidor",
 		"Vuelve a intentarlo en unos minutos."},
+}
+
+// AdminLoginConfirm is what the login link shows: one button whose POST
+// spends the key. The code is validated by the caller before it gets here.
+func AdminLoginConfirm(action, field, code string) *elem.Element {
+	form := elem.Form(attrs.Props{attrs.Method: "POST", attrs.Action: action},
+		elem.Input(attrs.Props{attrs.Type: "hidden", attrs.Name: field, attrs.Value: html.EscapeString(code)}),
+		elem.Button(attrs.Props{attrs.Type: "submit"}, elem.Text("Entrar a las invitaciones")),
+	)
+
+	return adminLayout("Entrar", "admin-login-confirm", H2(elem.Text("Invitaciones")), form)
 }
 
 // AdminDenied renders a refusal, or the page after signing out.
