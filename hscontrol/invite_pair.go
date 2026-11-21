@@ -258,14 +258,70 @@ const (
 	pairLocked
 )
 
-// tryCode is one pairing attempt from ip. Reading the wrong count, comparing
-// and writing the count happen under one lock: the form token serves many
-// attempts, so parallel POSTs would otherwise all read the same count. The
-// wrong count is never reset by time inside the window, so attempt number
-// pairMaxWrong+1 and every one after it is locked.
-func (f *inviteFlow) tryCode(ip, code string) (waitingDevice, pairResult) {
+// failedTally counts the wrong codes typed for one invitation, from any
+// address, until its window ends.
+type failedTally struct {
+	count int
+	until time.Time
+}
+
+// pairMaxWrongPerInvite caps wrong codes for one invitation across all
+// addresses: the per-address count lives in an LRU, and filling it with
+// addresses would otherwise reset that count.
+const pairMaxWrongPerInvite = pairMaxWrong * 4
+
+// inviteLocked reports whether the invitation has used its wrong codes. It
+// fails closed: a new invitation is locked when the table is full of live
+// ones, so filling it never frees anyone. Callers hold pairMu.
+func (f *inviteFlow) inviteLocked(id uint64, now time.Time) bool {
+	t, ok := f.inviteWrong[id]
+	if ok && now.Before(t.until) {
+		return t.count >= pairMaxWrongPerInvite
+	}
+
+	if ok {
+		delete(f.inviteWrong, id)
+	}
+
+	if len(f.inviteWrong) < waitingSize {
+		return false
+	}
+
+	for k, v := range f.inviteWrong {
+		if !now.Before(v.until) {
+			delete(f.inviteWrong, k)
+		}
+	}
+
+	return len(f.inviteWrong) >= waitingSize
+}
+
+func (f *inviteFlow) countInviteWrong(id uint64, now time.Time) {
+	t, ok := f.inviteWrong[id]
+	if !ok || !now.Before(t.until) {
+		t = failedTally{until: now.Add(waitingTTL)}
+	}
+
+	t.count++
+	f.inviteWrong[id] = t
+}
+
+// tryCode is one pairing attempt from ip for the invitation inviteID. Reading
+// the wrong counts, comparing and writing them happen under one lock: the
+// form token serves many attempts, so parallel POSTs would otherwise all read
+// the same count. The counts are never reset by time inside the window, so
+// attempt number pairMaxWrong+1 from an address, and every one after the
+// invitation's cap, is locked even if its code is right. A matched code does
+// not clear the address's count: the caller does it once the device is
+// registered.
+func (f *inviteFlow) tryCode(ip string, inviteID uint64, code string) (waitingDevice, pairResult) {
 	f.pairMu.Lock()
 	defer f.pairMu.Unlock()
+
+	now := time.Now()
+	if f.inviteLocked(inviteID, now) {
+		return waitingDevice{}, pairLocked
+	}
 
 	wrong, _ := f.wrongCodes.Get(ip)
 	if wrong >= pairMaxWrong {
@@ -275,13 +331,19 @@ func (f *inviteFlow) tryCode(ip, code string) (waitingDevice, pairResult) {
 	wd, ok := f.waitingWith(ip, code)
 	if !ok {
 		f.wrongCodes.Add(ip, wrong+1)
+		f.countInviteWrong(inviteID, now)
 
 		return waitingDevice{}, pairWrong
 	}
 
-	f.wrongCodes.Remove(ip)
-
 	return wd, pairMatched
+}
+
+func (f *inviteFlow) forgetWrong(ip string) {
+	f.pairMu.Lock()
+	defer f.pairMu.Unlock()
+
+	f.wrongCodes.Remove(ip)
 }
 
 // PairHandler serves POST /join/pair: from Safari, the person types the code
@@ -309,7 +371,8 @@ func (f *inviteFlow) PairHandler(w http.ResponseWriter, req *http.Request) {
 		return
 	}
 
-	wd, status := f.tryCode(clientIP(req), strings.TrimSpace(req.PostFormValue(pairCodeField))) //nolint:gosec // bounded by confirmed
+	ip := clientIP(req)
+	wd, status := f.tryCode(ip, pak.ID, strings.TrimSpace(req.PostFormValue(pairCodeField))) //nolint:gosec // bounded by confirmed
 
 	switch status {
 	case pairLocked:
@@ -323,5 +386,7 @@ func (f *inviteFlow) PairHandler(w http.ResponseWriter, req *http.Request) {
 	}
 
 	cookie, _ := req.Cookie(inviteCookie)
-	f.finish(w, req, wd.authID, pak, cookie.Value, pairPath)
+	if f.finish(w, req, wd.authID, pak, cookie.Value, pairPath) {
+		f.forgetWrong(ip)
+	}
 }

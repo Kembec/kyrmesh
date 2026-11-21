@@ -2,6 +2,7 @@ package hscontrol
 
 import (
 	"context"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -11,6 +12,7 @@ import (
 	"time"
 
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 func (e *inviteEnv) pairWithOrigin(origin, csrfForm, code string, cookies ...*http.Cookie) *httptest.ResponseRecorder {
@@ -97,4 +99,29 @@ func TestInvitePagesSendSameOriginReferrerPolicy(t *testing.T) {
 	assert.Equal(t, "same-origin", e.get("/register/"+authID.String(), invite).Header().Get("Referrer-Policy"))
 	assert.Equal(t, "no-referrer", referrerPolicy("/register/confirm/"+authID.String()))
 	assert.Equal(t, "no-referrer", referrerPolicy("/health"))
+}
+
+// Filling the per-address LRU with other addresses must not reset the count
+// of an invitation: its own cap stays, and the right code is still locked.
+func TestPairInviteCapSurvivesManyAddresses(t *testing.T) {
+	e := newInviteEnv(t)
+	authID := e.pendingDevice("localhost")
+	code := e.appCode(authID)
+
+	exp := time.Now().Add(time.Hour)
+	pak, err := e.app.state.CreatePreAuthKey(e.user.TypedID(), false, false, &exp, nil)
+	require.NoError(t, err)
+
+	invite := e.join(pak.Key)
+	_, csrf := e.safari(invite)
+
+	for i := range 2*waitingSize + 1 {
+		ip := fmt.Sprintf("10.%d.%d.%d", i>>16&255, i>>8&255, i&255)
+		_, res := e.app.invites.tryCode(ip, pak.ID, "0000")
+		require.NotEqual(t, pairMatched, res)
+	}
+
+	rec := e.pair(csrf.Value, code, invite, csrf)
+	assert.Equal(t, http.StatusTooManyRequests, rec.Code)
+	assert.Equal(t, 0, e.app.state.ListNodes().Len())
 }

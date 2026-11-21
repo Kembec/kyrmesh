@@ -64,6 +64,8 @@ type inviteFlow struct {
 	// the code, write the count) one step, so parallel POSTs cannot guess past
 	// the limit.
 	pairMu sync.Mutex
+	// inviteWrong counts the wrong codes per invitation, guarded by pairMu.
+	inviteWrong map[uint64]failedTally
 }
 
 func newInviteFlow(h *Headscale, serverURL string) *inviteFlow {
@@ -73,6 +75,8 @@ func newInviteFlow(h *Headscale, serverURL string) *inviteFlow {
 		done:       expirable.NewLRU[types.AuthID, types.NodeID](inviteDoneSize, nil, inviteDoneTTL),
 		waiting:    expirable.NewLRU[types.AuthID, waitingDevice](waitingSize, nil, waitingTTL),
 		wrongCodes: expirable.NewLRU[string, int](waitingSize, nil, waitingTTL),
+
+		inviteWrong: map[uint64]failedTally{},
 	}
 }
 
@@ -299,19 +303,19 @@ func (f *inviteFlow) JoinRegisterHandler(w http.ResponseWriter, req *http.Reques
 // finish registers the waiting device with the stored invitation and sends
 // the browser to its status page. Both the confirmation and the Safari
 // pairing end here.
-func (f *inviteFlow) finish(w http.ResponseWriter, req *http.Request, authID types.AuthID, pak *types.PreAuthKey, code, csrfPath string) {
+func (f *inviteFlow) finish(w http.ResponseWriter, req *http.Request, authID types.AuthID, pak *types.PreAuthKey, code, csrfPath string) bool {
 	node, nodeChange, err := f.h.state.HandleNodeFromInvite(authID, code)
 	if err != nil {
 		f.registerFailed(w, req, err)
 
-		return
+		return false
 	}
 
 	if !node.Valid() {
 		f.h.Change(nodeChange)
 		renderInvite(w, http.StatusInternalServerError, templates.InviteError(templates.InviteFailed))
 
-		return
+		return false
 	}
 
 	routeChange, err := f.h.state.AutoApproveRoutes(node)
@@ -332,6 +336,8 @@ func (f *inviteFlow) finish(w http.ResponseWriter, req *http.Request, authID typ
 	f.waiting.Remove(authID)
 	f.done.Add(authID, node.ID())
 	http.Redirect(w, req, "/join/status/"+authID.String(), http.StatusSeeOther)
+
+	return true
 }
 
 // confirmed checks the POST came from the confirmation page this server
@@ -339,14 +345,12 @@ func (f *inviteFlow) finish(w http.ResponseWriter, req *http.Request, authID typ
 // to its cookie, which is scoped by Path to this auth_id. It returns the
 // token, which also names the key the page showed.
 func (f *inviteFlow) confirmed(w http.ResponseWriter, req *http.Request) (string, bool) {
-	// "null" is what Safari sends on a POST from these pages: they carry
-	// Referrer-Policy: no-referrer, and the Fetch standard then serializes the
-	// Origin as null (measured on an iPad, 21/11). The invitation pages now
-	// send same-origin so the Origin is real; null stays accepted only with a
-	// valid token. It says nothing, so the
-	// form token and the SameSite cookie decide; a foreign origin is refused.
+	// "null" is refused: the form token only equals its cookie, a pair a
+	// same-site origin can forge, so Origin is the check that holds. The
+	// pages send Referrer-Policy: same-origin, so a real browser posts its
+	// real Origin from them.
 	origin := req.Header.Get("Origin")
-	if origin != "" && origin != "null" && !f.sameOrigin(origin) {
+	if origin != "" && !f.sameOrigin(origin) {
 		return "", false
 	}
 

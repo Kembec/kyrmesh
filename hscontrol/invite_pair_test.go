@@ -197,9 +197,10 @@ func TestPairStopsAfterTooManyWrongCodes(t *testing.T) {
 	assert.Equal(t, 0, e.app.state.ListNodes().Len())
 }
 
-// Safari sends Origin: null on these POSTs (Referrer-Policy: no-referrer);
-// the iPad pairing failed on it (21/11). A foreign origin is still refused.
-func TestPairAcceptsTheNullOriginSafariSends(t *testing.T) {
+// Origin: null says nothing about who posts, so it is refused like a foreign
+// origin: the pages send Referrer-Policy: same-origin, which makes a real
+// browser post its real Origin.
+func TestPairRefusesTheNullOrigin(t *testing.T) {
 	e := newInviteEnv(t)
 	authID := e.pendingDevice("ipad")
 	code := e.appCode(authID)
@@ -207,20 +208,24 @@ func TestPairAcceptsTheNullOriginSafariSends(t *testing.T) {
 	invite := e.join(e.newKey(false, time.Hour))
 	_, csrf := e.safari(invite)
 
-	post := func(origin string) *httptest.ResponseRecorder {
-		form := url.Values{inviteCSRFCookie: {csrf.Value}, pairCodeField: {code}}
-		req := httptest.NewRequestWithContext(context.Background(), http.MethodPost, pairPath,
-			strings.NewReader(form.Encode()))
-		req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
-		req.Header.Set("Origin", origin)
+	assert.Equal(t, http.StatusForbidden, e.pairWithOrigin("https://evil.example", csrf.Value, code, invite, csrf).Code, "foreign origin")
+	assert.Equal(t, http.StatusForbidden, e.pairWithOrigin("null", csrf.Value, code, invite, csrf).Code, "null origin")
+	assert.Equal(t, 0, e.app.state.ListNodes().Len())
+}
 
-		return e.do(req, invite, csrf)
-	}
+// A cookie and a form field that are equal are forgeable from the same site,
+// so with Origin: null they do not connect anything.
+func TestPairRefusesAForgedTokenPairWithNullOrigin(t *testing.T) {
+	e := newInviteEnv(t)
+	authID := e.pendingDevice("ipad")
+	code := e.appCode(authID)
 
-	assert.Equal(t, http.StatusForbidden, post("https://evil.example").Code, "foreign origin")
-	rec := post("null")
-	require.Equal(t, http.StatusSeeOther, rec.Code, rec.Body.String())
-	assert.Equal(t, 1, e.app.state.ListNodes().Len())
+	invite := e.join(e.newKey(false, time.Hour))
+	_, csrf := e.safari(invite)
+	forged := &http.Cookie{Name: inviteCSRFCookie, Value: csrf.Value}
+
+	assert.Equal(t, http.StatusForbidden, e.pairWithOrigin("null", forged.Value, code, invite, forged).Code)
+	assert.Equal(t, 0, e.app.state.ListNodes().Len())
 }
 
 func TestDeviceModelNamesTheModelForAPerson(t *testing.T) {
