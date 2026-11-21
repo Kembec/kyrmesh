@@ -112,6 +112,9 @@ type Config struct {
 	BaseDomain          string
 	Log                 LogConfig
 	DisableUpdateCheck  bool
+	// HideFingerprint drops /version and /swagger, which name the software
+	// and its exact version to anyone who reaches the server.
+	HideFingerprint bool
 
 	Database DatabaseConfig
 
@@ -205,6 +208,17 @@ type TLSConfig struct {
 	KeyPath  string
 
 	LetsEncrypt LetsEncryptConfig
+	DNS01       DNS01Config
+}
+
+// DNS01Config is a wildcard certificate obtained with the ACME DNS-01
+// challenge through Cloudflare, so the server's own name never reaches the
+// public Certificate Transparency logs (Kyrmesh, KEM-460).
+type DNS01Config struct {
+	Wildcard            string
+	CloudflareZone      string
+	CloudflareTokenPath string
+	CacheDir            string
 }
 
 type LetsEncryptConfig struct {
@@ -628,6 +642,8 @@ func validateServerConfig() error {
 		errorText += "Fatal config error: set either tls_letsencrypt_hostname or tls_cert_path/tls_key_path, not both\n"
 	}
 
+	errorText += validateDNS01()
+
 	if viper.GetString("noise.private_key_path") == "" {
 		errorText += "Fatal config error: headscale now requires a new `noise.private_key_path` field in the config file for the Tailscale v2 protocol\n"
 	}
@@ -729,6 +745,16 @@ func tlsConfig() TLSConfig {
 				viper.GetString("tls_letsencrypt_cache_dir"),
 			),
 			ChallengeType: viper.GetString("tls_letsencrypt_challenge_type"),
+		},
+		DNS01: DNS01Config{
+			Wildcard:       viper.GetString("tls_dns01_wildcard"),
+			CloudflareZone: viper.GetString("tls_dns01_cloudflare_zone"),
+			CloudflareTokenPath: util.AbsolutePathFromConfigPath(
+				viper.GetString("tls_dns01_cloudflare_token_path"),
+			),
+			CacheDir: util.AbsolutePathFromConfigPath(
+				viper.GetString("tls_dns01_cache_dir"),
+			),
 		},
 		CertPath: util.AbsolutePathFromConfigPath(
 			viper.GetString("tls_cert_path"),
@@ -1265,6 +1291,8 @@ func LoadServerConfig() (*Config, error) {
 		GRPCAllowInsecure:  viper.GetBool("grpc_allow_insecure"),
 		TrustedProxies:     trusted,
 		DisableUpdateCheck: false,
+		// Read here, by the server: the CLI never serves routes (review, 20/11).
+		HideFingerprint: viper.GetBool("hide_fingerprint"),
 
 		PrefixV4:     prefix4,
 		PrefixV6:     prefix6,
