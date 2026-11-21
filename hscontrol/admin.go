@@ -23,10 +23,11 @@ import (
 // Access opens no new door: there is no password and no new kind of
 // credential. Whoever can already run the CLI on the server gets, with
 // `kyr admin link`, a link that carries an API key ten minutes long.
-// Opening it expires that key and starts a browser session, so the same
-// link never opens a second one. Every /admin route answers 403 to anyone
-// else. An API key already grants full control through /api/v1, so the
-// console grants nothing an API key does not.
+// Opening it (GET) only shows a one-button form, so a link previewer spends
+// nothing; pressing the button (POST) expires that key and starts a browser
+// session, so the same link never opens a second one. Every /admin route
+// answers 403 to anyone else. An API key already grants full control
+// through /api/v1, so the console grants nothing an API key does not.
 //
 // Sessions live in memory: a restart signs the administrator out.
 const (
@@ -354,9 +355,9 @@ func (a *adminConsole) setCookie(w http.ResponseWriter, req *http.Request, value
 		MaxAge:   seconds,
 		Secure:   strings.HasPrefix(a.serverURL, "https://") || req.TLS != nil,
 		HttpOnly: true,
-		// Lax lets the link open the console from a chat or the terminal;
-		// it never rides a cross-site POST, and every form also carries the
-		// session's token.
+		// Lax keeps the session on a top-level navigation from a chat or the
+		// terminal; it never rides a cross-site POST, and every form also
+		// carries the session's token.
 		SameSite: http.SameSiteLaxMode,
 	})
 }
