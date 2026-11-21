@@ -7,6 +7,7 @@ import (
 	"net/url"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/hashicorp/golang-lru/v2/expirable"
@@ -52,13 +53,30 @@ type inviteFlow struct {
 	serverURL string
 	// done maps a finished auth_id to the node it registered.
 	done *expirable.LRU[types.AuthID, types.NodeID]
+	// waiting holds devices that opened /register without the invitation
+	// (the iOS app's login browser does not share Safari's cookies), so the
+	// invitation page in Safari can connect them (KEM-471).
+	waiting *expirable.LRU[types.AuthID, waitingDevice]
+	// wrongCodes counts the codes typed in Safari that matched no device
+	// waiting from that address.
+	wrongCodes *expirable.LRU[string, int]
+	// pairMu makes a pairing attempt (read the address's wrong count, compare
+	// the code, write the count) one step, so parallel POSTs cannot guess past
+	// the limit.
+	pairMu sync.Mutex
+	// inviteWrong counts the wrong codes per invitation, guarded by pairMu.
+	inviteWrong map[uint64]failedTally
 }
 
 func newInviteFlow(h *Headscale, serverURL string) *inviteFlow {
 	return &inviteFlow{
-		h:         h,
-		serverURL: strings.TrimSuffix(serverURL, "/"),
-		done:      expirable.NewLRU[types.AuthID, types.NodeID](inviteDoneSize, nil, inviteDoneTTL),
+		h:          h,
+		serverURL:  strings.TrimSuffix(serverURL, "/"),
+		done:       expirable.NewLRU[types.AuthID, types.NodeID](inviteDoneSize, nil, inviteDoneTTL),
+		waiting:    expirable.NewLRU[types.AuthID, waitingDevice](waitingSize, nil, waitingTTL),
+		wrongCodes: expirable.NewLRU[string, int](waitingSize, nil, waitingTTL),
+
+		inviteWrong: map[uint64]failedTally{},
 	}
 }
 
@@ -124,16 +142,30 @@ func (f *inviteFlow) JoinHandler(w http.ResponseWriter, req *http.Request) {
 		return
 	}
 
+	f.showSteps(w, req, pak, http.StatusOK, false)
+}
+
+// showSteps renders the steps of a valid invitation; wrongCode says the code
+// typed in Safari matched no device waiting from this network.
+func (f *inviteFlow) showSteps(w http.ResponseWriter, req *http.Request, pak *types.PreAuthKey, status int, wrongCode bool) {
 	expires := ""
 	if pak.Expiration != nil {
 		expires = pak.Expiration.Local().Format(" y vence el 02/01/2006 a las 15:04")
 	}
 
-	renderInvite(w, http.StatusOK, templates.InviteSteps(templates.InviteStepsInfo{
+	info := templates.InviteStepsInfo{
 		User:      inviteOwner(pak),
 		Expires:   expires,
 		ServerURL: f.serverURL,
-	}))
+	}
+
+	if err := f.addPairForm(w, req, pak, &info, wrongCode); err != nil { //nolint:noinlineerr
+		httpUserError(w, err)
+
+		return
+	}
+
+	renderInvite(w, status, templates.InviteSteps(info))
 }
 
 // stored returns the invitation kept in the cookie, or why there is none.
@@ -152,7 +184,7 @@ func (f *inviteFlow) stored(req *http.Request) (*types.PreAuthKey, string) {
 func (f *inviteFlow) RegisterHandler(next http.HandlerFunc) http.HandlerFunc {
 	return func(w http.ResponseWriter, req *http.Request) {
 		if cookie, err := req.Cookie(inviteCookie); err != nil || cookie.Value == "" {
-			next(w, req)
+			f.returnToSafari(w, req, next)
 
 			return
 		}
@@ -265,18 +297,25 @@ func (f *inviteFlow) JoinRegisterHandler(w http.ResponseWriter, req *http.Reques
 		return
 	}
 
-	node, nodeChange, err := f.h.state.HandleNodeFromInvite(authID, cookie.Value)
+	f.finish(w, req, authID, pak, cookie.Value, "/join/register/"+authID.String())
+}
+
+// finish registers the waiting device with the stored invitation and sends
+// the browser to its status page. Both the confirmation and the Safari
+// pairing end here.
+func (f *inviteFlow) finish(w http.ResponseWriter, req *http.Request, authID types.AuthID, pak *types.PreAuthKey, code, csrfPath string) bool {
+	node, nodeChange, err := f.h.state.HandleNodeFromInvite(authID, code)
 	if err != nil {
 		f.registerFailed(w, req, err)
 
-		return
+		return false
 	}
 
 	if !node.Valid() {
 		f.h.Change(nodeChange)
 		renderInvite(w, http.StatusInternalServerError, templates.InviteError(templates.InviteFailed))
 
-		return
+		return false
 	}
 
 	routeChange, err := f.h.state.AutoApproveRoutes(node)
@@ -293,9 +332,12 @@ func (f *inviteFlow) JoinRegisterHandler(w http.ResponseWriter, req *http.Reques
 		Msg("invite: node registered")
 
 	f.clearCookie(w, req, inviteCookie, "/")
-	f.clearCookie(w, req, inviteCSRFCookie, "/join/register/"+authID.String())
+	f.clearCookie(w, req, inviteCSRFCookie, csrfPath)
+	f.waiting.Remove(authID)
 	f.done.Add(authID, node.ID())
 	http.Redirect(w, req, "/join/status/"+authID.String(), http.StatusSeeOther)
+
+	return true
 }
 
 // confirmed checks the POST came from the confirmation page this server
@@ -303,7 +345,12 @@ func (f *inviteFlow) JoinRegisterHandler(w http.ResponseWriter, req *http.Reques
 // to its cookie, which is scoped by Path to this auth_id. It returns the
 // token, which also names the key the page showed.
 func (f *inviteFlow) confirmed(w http.ResponseWriter, req *http.Request) (string, bool) {
-	if origin := req.Header.Get("Origin"); origin != "" && !f.sameOrigin(origin) {
+	// "null" is refused: the form token only equals its cookie, a pair a
+	// same-site origin can forge, so Origin is the check that holds. The
+	// pages send Referrer-Policy: same-origin, so a real browser posts its
+	// real Origin from them.
+	origin := req.Header.Get("Origin")
+	if origin != "" && !f.sameOrigin(origin) {
 		return "", false
 	}
 

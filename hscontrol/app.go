@@ -543,9 +543,21 @@ func securityHeaders(next http.Handler) http.Handler {
 		h.Set("X-Frame-Options", "DENY")
 		h.Set("Content-Security-Policy", "frame-ancestors 'none'")
 		h.Set("X-Content-Type-Options", "nosniff")
-		h.Set("Referrer-Policy", "no-referrer")
+		h.Set("Referrer-Policy", referrerPolicy(r.URL.Path))
 		next.ServeHTTP(w, r)
 	})
+}
+
+// referrerPolicy is no-referrer, except on the invitation and pairing pages:
+// with no-referrer Safari posts their forms with Origin: null, which says
+// nothing; same-origin keeps the Origin real and still sends nothing out.
+func referrerPolicy(path string) string {
+	if path == "/join" || strings.HasPrefix(path, "/join/") ||
+		(strings.HasPrefix(path, "/register/") && !strings.HasPrefix(path, "/register/confirm/")) {
+		return "same-origin"
+	}
+
+	return "no-referrer"
 }
 
 func (h *Headscale) createRouter(grpcMux *grpcRuntime.ServeMux) *chi.Mux {
@@ -584,6 +596,7 @@ func (h *Headscale) createRouter(grpcMux *grpcRuntime.ServeMux) *chi.Mux {
 	r.Get("/register/{auth_id}", h.invites.RegisterHandler(h.authProvider.RegisterHandler))
 	r.Get("/join", h.invites.JoinHandler)
 	r.Post("/join/register/{auth_id}", h.invites.JoinRegisterHandler)
+	r.Post("/join/pair", h.invites.PairHandler)
 	r.Get("/join/status/{auth_id}", h.invites.JoinStatusHandler)
 	r.Get("/join/forget/{auth_id}", h.invites.ForgetHandler)
 	r.Get("/auth/{auth_id}", h.authProvider.AuthHandler)

@@ -194,15 +194,16 @@ func TestInviteJoinRejectsUnusableInvitations(t *testing.T) {
 	assert.Equal(t, templates.InviteMissing, marker(rec.Body.String()), "no invitation stored")
 }
 
-func TestInviteRegisterWithoutInvitationKeepsTheProviderPage(t *testing.T) {
+func TestInviteRegisterWithoutInvitationSendsBackToSafari(t *testing.T) {
 	e := newInviteEnv(t)
 	authID := e.pendingDevice("laptop")
 
 	rec := e.get("/register/" + authID.String())
 
 	require.Equal(t, http.StatusOK, rec.Code)
-	assert.Contains(t, rec.Body.String(), "headscale auth register")
-	assert.Empty(t, marker(rec.Body.String()))
+	assert.Equal(t, "invite-return", marker(rec.Body.String()))
+	// The admin path stays on the page for whoever runs the network.
+	assert.Contains(t, rec.Body.String(), "headscale auth register --auth-id "+authID.String())
 }
 
 func TestInviteConfirmRegistersTheDeviceAsTheKeySays(t *testing.T) {

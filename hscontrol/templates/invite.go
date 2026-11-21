@@ -20,6 +20,7 @@ const (
 	InviteNotConfirmed   = "not-confirmed"
 	InviteDeviceUnknown  = "device-unknown"
 	InviteFailed         = "invite-failed"
+	InvitePairLocked     = "pair-locked"
 )
 
 const inviteLang = "es"
@@ -32,6 +33,21 @@ type InviteStepsInfo struct {
 	Expires string
 	// ServerURL is the address the app must point at.
 	ServerURL string
+	// Pair is set when a device opened the login page from this network
+	// without the invitation: the person types the code its app shows.
+	Pair *InvitePair
+}
+
+// InvitePair is the form that connects, from Safari, the device waiting from
+// this network whose code the person types. The page never lists the waiting
+// devices nor their codes: two of one home wait from the same address.
+type InvitePair struct {
+	FormAction    string
+	CSRFTokenName string
+	CSRFToken     string
+	CodeName      string
+	// WrongCode: the last code typed is not one of a device waiting here.
+	WrongCode bool
 }
 
 // InviteSteps renders the three steps that take a person from the
@@ -60,12 +76,99 @@ func InviteSteps(info InviteStepsInfo) *elem.Element {
 				Code(elem.Text(info.ServerURL)),
 			),
 			inviteStep("Abre la app y toca «Iniciar sesión» («Log in» si está en inglés).",
-				elem.Text("Se abrirá una página para que confirmes que este dispositivo es tuyo."),
+				elem.Text("Si la app abre una página que dice «Termina en Safari», vuelve aquí y escribe "+
+					"el código que te muestra."),
 			),
 		),
+		invitePairSection(info.Pair),
 		P(elem.Text("Haz estos pasos en el dispositivo que quieres conectar. Si abriste el enlace dentro de WhatsApp "+
 			"o del correo, ábrelo en Safari o Chrome: la invitación se guarda en el navegador.")),
 	)
+}
+
+func invitePairSection(pair *InvitePair) elem.Node {
+	if pair == nil {
+		return P(
+			elem.Text("¿Ya tocaste «Iniciar sesión» en la app? "),
+			elem.A(attrs.Props{attrs.Href: "/join"}, elem.Text("Actualiza esta página")),
+			elem.Text(" para conectar tu dispositivo."),
+		)
+	}
+
+	items := []elem.Node{
+		elem.Input(attrs.Props{attrs.Type: "hidden", attrs.Name: pair.CSRFTokenName, attrs.Value: pair.CSRFToken}),
+		H3(elem.Text("Conecta tu dispositivo")),
+		elem.Label(attrs.Props{attrs.For: pair.CodeName}, elem.Text("Escribe el código que te muestra la app:")),
+		elem.Br(nil),
+		elem.Input(attrs.Props{
+			attrs.Type:         "text",
+			attrs.ID:           pair.CodeName,
+			attrs.Name:         pair.CodeName,
+			"inputmode":        "numeric",
+			"pattern":          "[0-9]{4}",
+			attrs.MaxLength:    "4",
+			attrs.Autocomplete: "one-time-code",
+			attrs.Required:     "true",
+			attrs.Style: styles.Props{
+				styles.FontSize:      "1.75rem",
+				styles.LetterSpacing: "0.2em",
+				styles.Width:         "7ch",
+				styles.Padding:       spaceS,
+				styles.MarginTop:     spaceS,
+				styles.MarginBottom:  spaceM,
+			}.ToInline(),
+		}),
+	}
+
+	if pair.WrongCode {
+		items = append(items, elem.P(attrs.Props{attrs.Role: "alert", "data-kyrmesh-wrong-code": ""},
+			elem.Text("Ese código no es de ningún dispositivo que espera desde esta red. "+
+				"Revisa el que te muestra la app y escríbelo otra vez.")))
+	}
+
+	items = append(items, elem.Button(attrs.Props{attrs.Type: "submit"}, elem.Text("Conectar")))
+
+	return elem.Form(attrs.Props{attrs.Method: "POST", attrs.Action: pair.FormAction, "data-kyrmesh-pair": ""}, items...)
+}
+
+// InviteReturnInfo is the page a device sees when its login opened without
+// the invitation (the iOS app's browser does not share Safari's cookies).
+type InviteReturnInfo struct {
+	// Device names this device by its model, so the person knows which one
+	// the code belongs to; empty when the device said nothing about itself.
+	Device       string
+	Code         string
+	AdminCommand string
+}
+
+// InviteReturn sends the person back to Safari, where the invitation is.
+func InviteReturn(info InviteReturnInfo) *elem.Element {
+	return invitePage("Termina en Safari", "invite-return",
+		H2(elem.Text("Termina en Safari")),
+		P(elem.Text("Vuelve a Safari, a la página de tu invitación, y escribe este código:")),
+		elem.Div(attrs.Props{
+			attrs.Style: styles.Props{
+				styles.FontSize:      "2.5rem",
+				styles.FontWeight:    "700",
+				styles.LetterSpacing: "0.2em",
+				styles.MarginBottom:  spaceL,
+			}.ToInline(),
+			"data-kyrmesh-code": info.Code,
+		}, elem.Text(info.Code)),
+		inviteReturnDevice(info.Device),
+		P(elem.Text("Si no tienes una invitación, pídesela a quien administra la red.")),
+		P(elem.Text("Para quien administra la red: "), Code(elem.Text(info.AdminCommand))),
+	)
+}
+
+// inviteReturnDevice says which device the code belongs to, when the device
+// reported its model or system.
+func inviteReturnDevice(device string) elem.Node {
+	if device == "" {
+		return elem.Text("")
+	}
+
+	return P(elem.Text("Este dispositivo: "), elem.Strong(nil, elem.Text(device)))
 }
 
 // InviteConfirmInfo is what the confirmation page shows before the device
@@ -158,6 +261,8 @@ var inviteProblems = map[string][2]string{
 		"Vuelve a la app y toca «Iniciar sesión» otra vez."},
 	InviteDeviceUnknown: {"No encontramos ese dispositivo",
 		"Vuelve a la app: si dice «Conectado», ya está listo. Si no, toca «Iniciar sesión» otra vez."},
+	InvitePairLocked: {"Demasiados códigos que no coinciden",
+		"Por seguridad, espera 10 minutos, vuelve a abrir esta página y escribe el código que te muestra la app."},
 	InviteFailed: {"No se pudo conectar el dispositivo",
 		"En unos minutos, vuelve a la app y toca «Iniciar sesión». Si sigue fallando, avisa a quien te invitó."},
 }
