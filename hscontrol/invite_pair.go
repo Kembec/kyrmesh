@@ -2,11 +2,12 @@ package hscontrol
 
 import (
 	"crypto/rand"
+	"crypto/subtle"
 	"fmt"
 	"math/big"
 	"net"
 	"net/http"
-	"slices"
+	"regexp"
 	"strconv"
 	"strings"
 	"time"
@@ -20,14 +21,22 @@ import (
 // page in a browser that does not see the invitation Safari stored, so the
 // device reached /register without it and the person was shown an admin
 // command (measured on the first real iPhone, 20/11). Now that page tells the
-// person to go back to Safari and shows a code; the invitation page in Safari
-// lists the devices waiting from the same network, each with its code, and
-// connecting one happens there, where the invitation is.
+// person to go back to Safari and shows a code; there the person types it,
+// and the device waiting from the same network with that code is connected,
+// where the invitation is.
+//
+// The code is what tells devices apart, never the list: an iPad and an iPhone
+// of one home wait from the same address, both named «iOS», and the iPad
+// connected the iPhone from a list of buttons (measured 21/11).
 const (
-	pairPath       = "/join/pair"
-	waitingTTL     = 10 * time.Minute
-	waitingSize    = 1024
-	waitingListMax = 5
+	pairPath      = "/join/pair"
+	pairCodeField = "code"
+	waitingTTL    = 10 * time.Minute
+	waitingSize   = 1024
+	// Codes are 4 digits; after this many wrong ones from an address, pairing
+	// from it stops until its waits expire, so guessing a neighbour's device
+	// on a shared network is 5 tries in 9000.
+	pairMaxWrong = 5
 )
 
 type waitingDevice struct {
@@ -59,18 +68,61 @@ func pairCode() (string, error) {
 	return strconv.FormatInt(n.Int64()+1000, 10), nil
 }
 
+// appleModel matches Apple's hardware identifiers ("iPhone15,4", "iPad13,4").
+var appleModel = regexp.MustCompile(`^(iPhone|iPad|iPod|Mac|Watch)\d+,\d+$`)
+
+// freeCode is a pairing code no other device waiting from ip shows, so a
+// code names one device on that network.
+func (f *inviteFlow) freeCode(ip string) (string, error) {
+	for {
+		code, err := pairCode()
+		if err != nil {
+			return "", err
+		}
+
+		if _, taken := f.waitingWith(ip, code); !taken {
+			return code, nil
+		}
+	}
+}
+
+// deviceModel names the model for a person: "iPhone" rather than
+// "iPhone15,4". When the app does not report one, the login browser does:
+// an iPhone says so, and iPadOS browses as a Mac, so iOS plus "Macintosh" is
+// an iPad.
+func deviceModel(os, model, userAgent string) string {
+	if m := appleModel.FindStringSubmatch(model); m != nil {
+		return m[1]
+	}
+
+	if model != "" {
+		return model
+	}
+
+	switch {
+	case strings.Contains(userAgent, "iPad"):
+		return "iPad"
+	case strings.Contains(userAgent, "iPhone"):
+		return "iPhone"
+	case os == "iOS" && strings.Contains(userAgent, "Macintosh"):
+		return "iPad"
+	}
+
+	return ""
+}
+
 // deviceLabel names the device for a person. iOS reports "localhost" as its
 // hostname, so the model and the system go first.
-func deviceLabel(data *types.RegistrationData) string {
+func deviceLabel(data *types.RegistrationData, userAgent string) string {
 	if data == nil {
-		return "Dispositivo"
+		return ""
 	}
 
 	var parts []string
 
 	if hi := data.Hostinfo; hi != nil {
-		if hi.DeviceModel != "" {
-			parts = append(parts, hi.DeviceModel)
+		if model := deviceModel(hi.OS, hi.DeviceModel, userAgent); model != "" {
+			parts = append(parts, model)
 		}
 
 		if hi.OS != "" {
@@ -83,7 +135,7 @@ func deviceLabel(data *types.RegistrationData) string {
 	}
 
 	if len(parts) == 0 {
-		return "Dispositivo"
+		return ""
 	}
 
 	return strings.Join(parts, " · ")
@@ -93,7 +145,7 @@ func deviceLabel(data *types.RegistrationData) string {
 // registration gets the "finish in Safari" page with its code; anything else
 // (OIDC, SSH check) goes to the provider, unchanged.
 func (f *inviteFlow) returnToSafari(w http.ResponseWriter, req *http.Request, next http.HandlerFunc) {
-	if !f.webProvider {
+	if _, web := f.h.authProvider.(*AuthProviderWeb); !web {
 		next(w, req)
 
 		return
@@ -115,7 +167,9 @@ func (f *inviteFlow) returnToSafari(w http.ResponseWriter, req *http.Request, ne
 
 	wd, ok := f.waiting.Get(authID)
 	if !ok {
-		code, err := pairCode()
+		ip := clientIP(req)
+
+		code, err := f.freeCode(ip)
 		if err != nil {
 			httpUserError(w, err)
 
@@ -124,21 +178,22 @@ func (f *inviteFlow) returnToSafari(w http.ResponseWriter, req *http.Request, ne
 
 		wd = waitingDevice{
 			authID: authID,
-			ip:     clientIP(req),
+			ip:     ip,
 			code:   code,
-			device: deviceLabel(authReq.RegistrationData()),
+			device: deviceLabel(authReq.RegistrationData(), req.UserAgent()),
 			since:  time.Now(),
 		}
 		f.waiting.Add(authID, wd)
 	}
 
 	renderInvite(w, http.StatusOK, templates.InviteReturn(templates.InviteReturnInfo{
+		Device:       wd.device,
 		Code:         wd.code,
 		AdminCommand: "headscale auth register --auth-id " + authID.String() + " --user USUARIO",
 	}))
 }
 
-// waitingFrom lists the devices still waiting from ip, newest first.
+// waitingFrom lists the devices still waiting from ip.
 func (f *inviteFlow) waitingFrom(ip string) []waitingDevice {
 	var out []waitingDevice
 
@@ -155,16 +210,24 @@ func (f *inviteFlow) waitingFrom(ip string) []waitingDevice {
 		out = append(out, wd)
 	}
 
-	slices.SortFunc(out, func(a, b waitingDevice) int { return b.since.Compare(a.since) })
-
-	return out[:min(len(out), waitingListMax)]
+	return out
 }
 
-// addWaiting puts the devices waiting from this network on the invitation
-// page, with a form token bound to the invitation's key.
-func (f *inviteFlow) addWaiting(w http.ResponseWriter, req *http.Request, pak *types.PreAuthKey, info *templates.InviteStepsInfo) error {
-	waiting := f.waitingFrom(clientIP(req))
-	if len(waiting) == 0 {
+// waitingWith is the device waiting from ip whose app shows code.
+func (f *inviteFlow) waitingWith(ip, code string) (waitingDevice, bool) {
+	for _, wd := range f.waitingFrom(ip) {
+		if subtle.ConstantTimeCompare([]byte(wd.code), []byte(code)) == 1 {
+			return wd, true
+		}
+	}
+
+	return waitingDevice{}, false
+}
+
+// addPairForm puts the code form on the invitation page when a device waits
+// from this network, with a form token bound to the invitation's key.
+func (f *inviteFlow) addPairForm(w http.ResponseWriter, req *http.Request, pak *types.PreAuthKey, info *templates.InviteStepsInfo, wrongCode bool) error {
+	if len(f.waitingFrom(clientIP(req))) == 0 {
 		return nil
 	}
 
@@ -176,29 +239,55 @@ func (f *inviteFlow) addWaiting(w http.ResponseWriter, req *http.Request, pak *t
 	csrf := random + "." + strconv.FormatUint(pak.ID, 10)
 	f.setCookie(w, req, inviteCSRFCookie, pairPath, csrf, inviteCSRFMaxAge)
 
-	for _, wd := range waiting {
-		info.Waiting = append(info.Waiting, templates.InviteWaitingDevice{
-			Device:        wd.device,
-			Code:          wd.code,
-			FormAction:    pairPath + "/" + wd.authID.String(),
-			CSRFTokenName: inviteCSRFCookie,
-			CSRFToken:     csrf,
-		})
+	info.Pair = &templates.InvitePair{
+		FormAction:    pairPath,
+		CSRFTokenName: inviteCSRFCookie,
+		CSRFToken:     csrf,
+		CodeName:      pairCodeField,
+		WrongCode:     wrongCode,
 	}
 
 	return nil
 }
 
-// PairHandler serves POST /join/pair/{auth_id}: from Safari, the person
-// connects the device that is waiting from the same network.
-func (f *inviteFlow) PairHandler(w http.ResponseWriter, req *http.Request) {
-	authID, err := authIDFromRequest(req)
-	if err != nil {
-		httpUserError(w, err)
+type pairResult int
 
-		return
+const (
+	pairMatched pairResult = iota
+	pairWrong
+	pairLocked
+)
+
+// tryCode is one pairing attempt from ip. Reading the wrong count, comparing
+// and writing the count happen under one lock: the form token serves many
+// attempts, so parallel POSTs would otherwise all read the same count. The
+// wrong count is never reset by time inside the window, so attempt number
+// pairMaxWrong+1 and every one after it is locked.
+func (f *inviteFlow) tryCode(ip, code string) (waitingDevice, pairResult) {
+	f.pairMu.Lock()
+	defer f.pairMu.Unlock()
+
+	wrong, _ := f.wrongCodes.Get(ip)
+	if wrong >= pairMaxWrong {
+		return waitingDevice{}, pairLocked
 	}
 
+	wd, ok := f.waitingWith(ip, code)
+	if !ok {
+		f.wrongCodes.Add(ip, wrong+1)
+
+		return waitingDevice{}, pairWrong
+	}
+
+	f.wrongCodes.Remove(ip)
+
+	return wd, pairMatched
+}
+
+// PairHandler serves POST /join/pair: from Safari, the person types the code
+// the app shows, and only the device waiting from this same network with
+// that code is connected.
+func (f *inviteFlow) PairHandler(w http.ResponseWriter, req *http.Request) {
 	token, ok := f.confirmed(w, req)
 	if !ok {
 		renderInvite(w, http.StatusForbidden, templates.InviteError(templates.InviteNotConfirmed))
@@ -220,14 +309,19 @@ func (f *inviteFlow) PairHandler(w http.ResponseWriter, req *http.Request) {
 		return
 	}
 
-	// Only a device that is waiting from this same network can be paired.
-	wd, ok := f.waiting.Get(authID)
-	if !ok || wd.ip != clientIP(req) {
-		renderInvite(w, http.StatusForbidden, templates.InviteError(templates.InviteDeviceUnknown))
+	wd, status := f.tryCode(clientIP(req), strings.TrimSpace(req.PostFormValue(pairCodeField))) //nolint:gosec // bounded by confirmed
+
+	switch status {
+	case pairLocked:
+		renderInvite(w, http.StatusTooManyRequests, templates.InviteError(templates.InvitePairLocked))
+
+		return
+	case pairWrong:
+		f.showSteps(w, req, pak, http.StatusUnprocessableEntity, true)
 
 		return
 	}
 
 	cookie, _ := req.Cookie(inviteCookie)
-	f.finish(w, req, authID, pak, cookie.Value, pairPath)
+	f.finish(w, req, wd.authID, pak, cookie.Value, pairPath)
 }

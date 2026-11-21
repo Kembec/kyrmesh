@@ -7,6 +7,7 @@ import (
 	"net/url"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/hashicorp/golang-lru/v2/expirable"
@@ -56,20 +57,22 @@ type inviteFlow struct {
 	// (the iOS app's login browser does not share Safari's cookies), so the
 	// invitation page in Safari can connect them (KEM-471).
 	waiting *expirable.LRU[types.AuthID, waitingDevice]
-	// webProvider: registration is not OIDC, so a device without invitation
-	// may be paired from Safari instead of waiting for an admin.
-	webProvider bool
+	// wrongCodes counts the codes typed in Safari that matched no device
+	// waiting from that address.
+	wrongCodes *expirable.LRU[string, int]
+	// pairMu makes a pairing attempt (read the address's wrong count, compare
+	// the code, write the count) one step, so parallel POSTs cannot guess past
+	// the limit.
+	pairMu sync.Mutex
 }
 
 func newInviteFlow(h *Headscale, serverURL string) *inviteFlow {
-	_, web := h.authProvider.(*AuthProviderWeb)
-
 	return &inviteFlow{
-		webProvider: web,
-		h:           h,
-		serverURL:   strings.TrimSuffix(serverURL, "/"),
-		done:        expirable.NewLRU[types.AuthID, types.NodeID](inviteDoneSize, nil, inviteDoneTTL),
-		waiting:     expirable.NewLRU[types.AuthID, waitingDevice](waitingSize, nil, waitingTTL),
+		h:          h,
+		serverURL:  strings.TrimSuffix(serverURL, "/"),
+		done:       expirable.NewLRU[types.AuthID, types.NodeID](inviteDoneSize, nil, inviteDoneTTL),
+		waiting:    expirable.NewLRU[types.AuthID, waitingDevice](waitingSize, nil, waitingTTL),
+		wrongCodes: expirable.NewLRU[string, int](waitingSize, nil, waitingTTL),
 	}
 }
 
@@ -135,6 +138,12 @@ func (f *inviteFlow) JoinHandler(w http.ResponseWriter, req *http.Request) {
 		return
 	}
 
+	f.showSteps(w, req, pak, http.StatusOK, false)
+}
+
+// showSteps renders the steps of a valid invitation; wrongCode says the code
+// typed in Safari matched no device waiting from this network.
+func (f *inviteFlow) showSteps(w http.ResponseWriter, req *http.Request, pak *types.PreAuthKey, status int, wrongCode bool) {
 	expires := ""
 	if pak.Expiration != nil {
 		expires = pak.Expiration.Local().Format(" y vence el 02/01/2006 a las 15:04")
@@ -146,13 +155,13 @@ func (f *inviteFlow) JoinHandler(w http.ResponseWriter, req *http.Request) {
 		ServerURL: f.serverURL,
 	}
 
-	if err := f.addWaiting(w, req, pak, &info); err != nil { //nolint:noinlineerr
+	if err := f.addPairForm(w, req, pak, &info, wrongCode); err != nil { //nolint:noinlineerr
 		httpUserError(w, err)
 
 		return
 	}
 
-	renderInvite(w, http.StatusOK, templates.InviteSteps(info))
+	renderInvite(w, status, templates.InviteSteps(info))
 }
 
 // stored returns the invitation kept in the cookie, or why there is none.
@@ -332,9 +341,12 @@ func (f *inviteFlow) finish(w http.ResponseWriter, req *http.Request, authID typ
 func (f *inviteFlow) confirmed(w http.ResponseWriter, req *http.Request) (string, bool) {
 	// "null" is what Safari sends on a POST from these pages: they carry
 	// Referrer-Policy: no-referrer, and the Fetch standard then serializes the
-	// Origin as null (measured on an iPad, 21/11). It says nothing, so the
+	// Origin as null (measured on an iPad, 21/11). The invitation pages now
+	// send same-origin so the Origin is real; null stays accepted only with a
+	// valid token. It says nothing, so the
 	// form token and the SameSite cookie decide; a foreign origin is refused.
-	if origin := req.Header.Get("Origin"); origin != "" && origin != "null" && !f.sameOrigin(origin) {
+	origin := req.Header.Get("Origin")
+	if origin != "" && origin != "null" && !f.sameOrigin(origin) {
 		return "", false
 	}
 
