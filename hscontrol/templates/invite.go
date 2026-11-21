@@ -32,6 +32,18 @@ type InviteStepsInfo struct {
 	Expires string
 	// ServerURL is the address the app must point at.
 	ServerURL string
+	// Waiting are devices that opened the login page from this network
+	// without the invitation; the person connects one from here.
+	Waiting []InviteWaitingDevice
+}
+
+// InviteWaitingDevice is a device waiting to be connected from Safari.
+type InviteWaitingDevice struct {
+	Device        string
+	Code          string
+	FormAction    string
+	CSRFTokenName string
+	CSRFToken     string
 }
 
 // InviteSteps renders the three steps that take a person from the
@@ -60,11 +72,63 @@ func InviteSteps(info InviteStepsInfo) *elem.Element {
 				Code(elem.Text(info.ServerURL)),
 			),
 			inviteStep("Abre la app y toca «Iniciar sesión» («Log in» si está en inglés).",
-				elem.Text("Se abrirá una página para que confirmes que este dispositivo es tuyo."),
+				elem.Text("Si la app abre una página que dice «Termina en Safari», vuelve aquí: tu dispositivo "+
+					"aparecerá abajo con el mismo código para que lo conectes."),
 			),
 		),
+		inviteWaitingSection(info.Waiting),
 		P(elem.Text("Haz estos pasos en el dispositivo que quieres conectar. Si abriste el enlace dentro de WhatsApp "+
 			"o del correo, ábrelo en Safari o Chrome: la invitación se guarda en el navegador.")),
+	)
+}
+
+func inviteWaitingSection(waiting []InviteWaitingDevice) elem.Node {
+	if len(waiting) == 0 {
+		return P(
+			elem.Text("¿Ya tocaste «Iniciar sesión» en la app? "),
+			elem.A(attrs.Props{attrs.Href: "/join"}, elem.Text("Actualiza esta página")),
+			elem.Text(" para ver tu dispositivo."),
+		)
+	}
+
+	items := []elem.Node{H3(elem.Text("Tu dispositivo está esperando"))}
+	for _, d := range waiting {
+		items = append(items, elem.Form(
+			attrs.Props{attrs.Method: "POST", attrs.Action: d.FormAction, "data-kyrmesh-code": d.Code},
+			elem.Input(attrs.Props{attrs.Type: "hidden", attrs.Name: d.CSRFTokenName, attrs.Value: d.CSRFToken}),
+			P(elem.Strong(nil, elem.Text(d.Device)), elem.Text(" · código "), elem.Strong(nil, elem.Text(d.Code))),
+			elem.Button(attrs.Props{attrs.Type: "submit"}, elem.Text("Conectar este dispositivo")),
+		))
+	}
+
+	items = append(items, P(elem.Text("Conecta solo el que muestre el mismo código que ves en la app.")))
+
+	return elem.Div(nil, items...)
+}
+
+// InviteReturnInfo is the page a device sees when its login opened without
+// the invitation (the iOS app's browser does not share Safari's cookies).
+type InviteReturnInfo struct {
+	Code         string
+	AdminCommand string
+}
+
+// InviteReturn sends the person back to Safari, where the invitation is.
+func InviteReturn(info InviteReturnInfo) *elem.Element {
+	return invitePage("Termina en Safari", "invite-return",
+		H2(elem.Text("Termina en Safari")),
+		P(elem.Text("Vuelve a Safari, a la página de tu invitación, y toca «Conectar» en el dispositivo con este código:")),
+		elem.Div(attrs.Props{
+			attrs.Style: styles.Props{
+				styles.FontSize:      "2.5rem",
+				styles.FontWeight:    "700",
+				styles.LetterSpacing: "0.2em",
+				styles.MarginBottom:  spaceL,
+			}.ToInline(),
+			"data-kyrmesh-code": info.Code,
+		}, elem.Text(info.Code)),
+		P(elem.Text("Si no tienes una invitación, pídesela a quien administra la red.")),
+		P(elem.Text("Para quien administra la red: "), Code(elem.Text(info.AdminCommand))),
 	)
 }
 

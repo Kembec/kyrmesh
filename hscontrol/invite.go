@@ -52,13 +52,24 @@ type inviteFlow struct {
 	serverURL string
 	// done maps a finished auth_id to the node it registered.
 	done *expirable.LRU[types.AuthID, types.NodeID]
+	// waiting holds devices that opened /register without the invitation
+	// (the iOS app's login browser does not share Safari's cookies), so the
+	// invitation page in Safari can connect them (KEM-471).
+	waiting *expirable.LRU[types.AuthID, waitingDevice]
+	// webProvider: registration is not OIDC, so a device without invitation
+	// may be paired from Safari instead of waiting for an admin.
+	webProvider bool
 }
 
 func newInviteFlow(h *Headscale, serverURL string) *inviteFlow {
+	_, web := h.authProvider.(*AuthProviderWeb)
+
 	return &inviteFlow{
-		h:         h,
-		serverURL: strings.TrimSuffix(serverURL, "/"),
-		done:      expirable.NewLRU[types.AuthID, types.NodeID](inviteDoneSize, nil, inviteDoneTTL),
+		webProvider: web,
+		h:           h,
+		serverURL:   strings.TrimSuffix(serverURL, "/"),
+		done:        expirable.NewLRU[types.AuthID, types.NodeID](inviteDoneSize, nil, inviteDoneTTL),
+		waiting:     expirable.NewLRU[types.AuthID, waitingDevice](waitingSize, nil, waitingTTL),
 	}
 }
 
@@ -129,11 +140,19 @@ func (f *inviteFlow) JoinHandler(w http.ResponseWriter, req *http.Request) {
 		expires = pak.Expiration.Local().Format(" y vence el 02/01/2006 a las 15:04")
 	}
 
-	renderInvite(w, http.StatusOK, templates.InviteSteps(templates.InviteStepsInfo{
+	info := templates.InviteStepsInfo{
 		User:      inviteOwner(pak),
 		Expires:   expires,
 		ServerURL: f.serverURL,
-	}))
+	}
+
+	if err := f.addWaiting(w, req, pak, &info); err != nil { //nolint:noinlineerr
+		httpUserError(w, err)
+
+		return
+	}
+
+	renderInvite(w, http.StatusOK, templates.InviteSteps(info))
 }
 
 // stored returns the invitation kept in the cookie, or why there is none.
@@ -152,7 +171,7 @@ func (f *inviteFlow) stored(req *http.Request) (*types.PreAuthKey, string) {
 func (f *inviteFlow) RegisterHandler(next http.HandlerFunc) http.HandlerFunc {
 	return func(w http.ResponseWriter, req *http.Request) {
 		if cookie, err := req.Cookie(inviteCookie); err != nil || cookie.Value == "" {
-			next(w, req)
+			f.returnToSafari(w, req, next)
 
 			return
 		}
@@ -265,7 +284,14 @@ func (f *inviteFlow) JoinRegisterHandler(w http.ResponseWriter, req *http.Reques
 		return
 	}
 
-	node, nodeChange, err := f.h.state.HandleNodeFromInvite(authID, cookie.Value)
+	f.finish(w, req, authID, pak, cookie.Value, "/join/register/"+authID.String())
+}
+
+// finish registers the waiting device with the stored invitation and sends
+// the browser to its status page. Both the confirmation and the Safari
+// pairing end here.
+func (f *inviteFlow) finish(w http.ResponseWriter, req *http.Request, authID types.AuthID, pak *types.PreAuthKey, code, csrfPath string) {
+	node, nodeChange, err := f.h.state.HandleNodeFromInvite(authID, code)
 	if err != nil {
 		f.registerFailed(w, req, err)
 
@@ -293,7 +319,8 @@ func (f *inviteFlow) JoinRegisterHandler(w http.ResponseWriter, req *http.Reques
 		Msg("invite: node registered")
 
 	f.clearCookie(w, req, inviteCookie, "/")
-	f.clearCookie(w, req, inviteCSRFCookie, "/join/register/"+authID.String())
+	f.clearCookie(w, req, inviteCSRFCookie, csrfPath)
+	f.waiting.Remove(authID)
 	f.done.Add(authID, node.ID())
 	http.Redirect(w, req, "/join/status/"+authID.String(), http.StatusSeeOther)
 }

@@ -579,6 +579,7 @@ func (h *Headscale) createRouter(grpcMux *grpcRuntime.ServeMux) *chi.Mux {
 	r.Get("/register/{auth_id}", h.invites.RegisterHandler(h.authProvider.RegisterHandler))
 	r.Get("/join", h.invites.JoinHandler)
 	r.Post("/join/register/{auth_id}", h.invites.JoinRegisterHandler)
+	r.Post("/join/pair/{auth_id}", h.invites.PairHandler)
 	r.Get("/join/status/{auth_id}", h.invites.JoinStatusHandler)
 	r.Get("/join/forget/{auth_id}", h.invites.ForgetHandler)
 	r.Get("/auth/{auth_id}", h.authProvider.AuthHandler)
