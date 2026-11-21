@@ -109,6 +109,7 @@ type Headscale struct {
 	extraRecordMan *dns.ExtraRecordsMan
 	authProvider   AuthProvider
 	invites        *inviteFlow
+	admin          *adminConsole
 	mapBatcher     *mapper.Batcher
 
 	clientStreamsOpen sync.WaitGroup
@@ -216,6 +217,7 @@ func NewHeadscale(cfg *types.Config) (*Headscale, error) {
 
 	app.authProvider = authProvider
 	app.invites = newInviteFlow(&app, cfg.ServerURL)
+	app.admin = newAdminConsole(&app, cfg.ServerURL)
 
 	if app.cfg.TailcfgDNSConfig != nil && app.cfg.TailcfgDNSConfig.Proxied { // if MagicDNS
 		// TODO(kradalby): revisit why this takes a list.
@@ -592,6 +594,8 @@ func (h *Headscale) createRouter(grpcMux *grpcRuntime.ServeMux) *chi.Mux {
 	r.Get("/apple", h.AppleConfigMessage)
 	r.Get("/apple/{platform}", h.ApplePlatformConfig)
 	r.Get("/windows", h.WindowsConfigMessage)
+	// Invitations from the browser, for an administrator with a link (KEM-464).
+	h.admin.routes(r)
 
 	// TODO(kristoffer): move swagger into a package
 	if !h.cfg.HideFingerprint {
