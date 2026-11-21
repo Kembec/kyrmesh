@@ -330,7 +330,11 @@ func (f *inviteFlow) finish(w http.ResponseWriter, req *http.Request, authID typ
 // to its cookie, which is scoped by Path to this auth_id. It returns the
 // token, which also names the key the page showed.
 func (f *inviteFlow) confirmed(w http.ResponseWriter, req *http.Request) (string, bool) {
-	if origin := req.Header.Get("Origin"); origin != "" && !f.sameOrigin(origin) {
+	// "null" is what Safari sends on a POST from these pages: they carry
+	// Referrer-Policy: no-referrer, and the Fetch standard then serializes the
+	// Origin as null (measured on an iPad, 21/11). It says nothing, so the
+	// form token and the SameSite cookie decide; a foreign origin is refused.
+	if origin := req.Header.Get("Origin"); origin != "" && origin != "null" && !f.sameOrigin(origin) {
 		return "", false
 	}
 

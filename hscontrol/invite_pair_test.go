@@ -112,3 +112,29 @@ func TestPairNeedsTheTokenOfThisInvitation(t *testing.T) {
 	used := e.newKey(false, time.Hour)
 	assert.Equal(t, templates.InviteInvalid, marker(e.pair("/join/pair/"+authID.String(), csrf.Value, &http.Cookie{Name: inviteCookie, Value: used + "x"}, csrf).Body.String()))
 }
+
+// Safari sends Origin: null on these POSTs (Referrer-Policy: no-referrer);
+// the iPad pairing failed on it (21/11). A foreign origin is still refused.
+func TestPairAcceptsTheNullOriginSafariSends(t *testing.T) {
+	e := newInviteEnv(t)
+	authID := e.pendingDevice("ipad")
+	e.get("/register/" + authID.String())
+
+	invite := e.join(e.newKey(false, time.Hour))
+	safari := e.get("/join", invite)
+	csrf := cookieNamed(t, safari, inviteCSRFCookie)
+
+	post := func(origin string) *httptest.ResponseRecorder {
+		req := httptest.NewRequestWithContext(context.Background(), http.MethodPost, "/join/pair/"+authID.String(),
+			strings.NewReader(inviteCSRFCookie+"="+csrf.Value))
+		req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+		req.Header.Set("Origin", origin)
+
+		return e.do(req, invite, csrf)
+	}
+
+	assert.Equal(t, http.StatusForbidden, post("https://evil.example").Code, "foreign origin")
+	rec := post("null")
+	require.Equal(t, http.StatusSeeOther, rec.Code, rec.Body.String())
+	assert.Equal(t, 1, e.app.state.ListNodes().Len())
+}
