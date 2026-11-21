@@ -161,7 +161,7 @@ func generateDNSConfig(
 		}
 	}
 
-	return dnsConfig
+	return withCertDomains(dnsConfig, cfg, node, capMap)
 }
 
 // nextDNSProfileFromCapMap returns the policy-selected
