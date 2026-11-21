@@ -14,6 +14,7 @@ import (
 	"time"
 
 	hscontrol "github.com/juanfont/headscale/hscontrol"
+	"github.com/juanfont/headscale/hscontrol/dnscert"
 	"github.com/juanfont/headscale/hscontrol/state"
 	"github.com/juanfont/headscale/hscontrol/types"
 	"github.com/juanfont/headscale/hscontrol/util"
@@ -50,6 +51,8 @@ type serverConfig struct {
 	logTailEnabled   bool
 	magicDNSDomain   string
 	dnsResolvers     []string
+	nodeCertZone     string
+	nodeCertDNS      dnscert.TXTProvider
 }
 
 func defaultServerConfig() *serverConfig {
@@ -108,6 +111,15 @@ func WithMagicDNS(domain string) ServerOption {
 // [tailcfg.DNSConfig].
 func WithDNSResolvers(addrs ...string) ServerOption {
 	return func(c *serverConfig) { c.dnsResolvers = addrs }
+}
+
+// WithNodeCertificates lets nodes publish the ACME DNS-01 record of their
+// own name inside zone through dns. base_domain comes from [WithMagicDNS].
+func WithNodeCertificates(zone string, dns dnscert.TXTProvider) ServerOption {
+	return func(c *serverConfig) {
+		c.nodeCertZone = zone
+		c.nodeCertDNS = dns
+	}
 }
 
 // WithLogTailEnabled sets logtail.enabled, so the server leaves client log
@@ -179,9 +191,18 @@ func NewServer(tb testing.TB, opts ...ServerOption) *TestServer {
 		cfg.TailcfgDNSConfig.Resolvers = append(cfg.TailcfgDNSConfig.Resolvers, &dnstype.Resolver{Addr: addr})
 	}
 
+	if sc.nodeCertDNS != nil {
+		cfg.TLS.DNS01.CloudflareZone = sc.nodeCertZone
+		cfg.TLS.DNS01.CloudflareTokenPath = tmpDir + "/unused-token"
+	}
+
 	app, err := hscontrol.NewHeadscale(&cfg)
 	if err != nil {
 		tb.Fatalf("servertest: NewHeadscale: %v", err)
+	}
+
+	if sc.nodeCertDNS != nil {
+		app.SetNodeCertDNSForTest(tb, sc.nodeCertDNS)
 	}
 
 	// Set a minimal DERP map so MapResponse generation works.

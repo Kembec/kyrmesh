@@ -34,6 +34,7 @@ import (
 	"github.com/juanfont/headscale/hscontrol/derp"
 	derpServer "github.com/juanfont/headscale/hscontrol/derp/server"
 	"github.com/juanfont/headscale/hscontrol/dns"
+	"github.com/juanfont/headscale/hscontrol/dnscert"
 	"github.com/juanfont/headscale/hscontrol/mapper"
 	"github.com/juanfont/headscale/hscontrol/state"
 	"github.com/juanfont/headscale/hscontrol/types"
@@ -110,6 +111,7 @@ type Headscale struct {
 	authProvider   AuthProvider
 	invites        *inviteFlow
 	mapBatcher     *mapper.Batcher
+	nodeCerts      *dnscert.NodeChallenges
 
 	clientStreamsOpen sync.WaitGroup
 }
@@ -145,6 +147,7 @@ func NewHeadscale(cfg *types.Config) (*Headscale, error) {
 		noisePrivateKey:   noisePrivateKey,
 		clientStreamsOpen: sync.WaitGroup{},
 		state:             s,
+		nodeCerts:         newNodeChallenges(cfg),
 	}
 
 	if len(cfg.TrustedProxies) > 0 {

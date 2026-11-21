@@ -10,6 +10,7 @@ import (
 	"net/url"
 	"os"
 	"strings"
+	"sync"
 	"time"
 )
 
@@ -29,6 +30,8 @@ type Cloudflare struct {
 	BaseURL   string
 	HTTP      *http.Client
 
+	// zoneMu guards zoneID: node challenges look the zone up concurrently.
+	zoneMu sync.Mutex
 	zoneID string
 }
 
@@ -129,6 +132,9 @@ func (c *Cloudflare) call(ctx context.Context, method, path string, body any, ou
 }
 
 func (c *Cloudflare) zone(ctx context.Context) (string, error) {
+	c.zoneMu.Lock()
+	defer c.zoneMu.Unlock()
+
 	if c.zoneID != "" {
 		return c.zoneID, nil
 	}
