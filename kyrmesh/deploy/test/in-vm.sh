@@ -121,7 +121,8 @@ tamper() {
 reboot_checks() {
   for _ in $(seq 1 60); do systemctl is-active --quiet kyrmesh && break; sleep 2; done
   for _ in $(seq 1 30); do journalctl -u kyrmesh -b --no-pager | grep -q 'dnscert: loaded cached certificate' && break; sleep 2; done
-  journalctl -u kyrmesh-dns-a -b --no-pager | grep -q 'A record already points here' || fail "dns-a did not run at boot"
+  journalctl -u kyrmesh-dns-a -b --no-pager | grep -q 'A record already points here' \
+    || fail "dns-a did not find its A record at boot: $(journalctl -u kyrmesh-dns-a -b --no-pager -o cat | tail -1)"
   journalctl -u kyrmesh -b --no-pager | grep -q 'dnscert: loaded cached certificate' || fail "certificate not reused after reboot"
   checks
   pass "after a reboot: A record checked, cached certificate reused, server answering"

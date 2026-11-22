@@ -22,8 +22,20 @@ STATE = sys.argv[1]  # directory with config.json, the release files and calls.l
 CONF = json.load(open(os.path.join(STATE, "config.json")))
 LOCK = threading.Lock()  # guards RECORDS and NEXT
 LOG_LOCK = threading.Lock()  # separate: log() runs inside LOCK sections, and threading.Lock is not reentrant
-RECORDS = {}  # id -> record
-NEXT = [1]
+# The zone outlives the VM, as Cloudflare's does: records are kept on disk so the reboot phase
+# finds the A record the first boot created.
+ZONE_FILE = os.path.join(STATE, "zone.json")
+_saved = json.load(open(ZONE_FILE)) if os.path.exists(ZONE_FILE) else {"records": {}, "next": 1}
+RECORDS = _saved["records"]  # id -> record
+NEXT = [_saved["next"]]
+
+
+def save_zone():
+    # Called under LOCK; write then rename so a crash never leaves half a file.
+    tmp = ZONE_FILE + ".tmp"
+    with open(tmp, "w") as f:
+        json.dump({"records": RECORDS, "next": NEXT[0]}, f)
+    os.replace(tmp, ZONE_FILE)
 
 
 def log(line):
@@ -120,6 +132,7 @@ class Handler(BaseHTTPRequestHandler):
                 rec = RECORDS.pop(parts[3], None)
             if method != "DELETE":
                 RECORDS[rec["id"]] = rec
+            save_zone()
         if method == "DELETE":
             # Outside LOCK: a DELETE that logged or called challtestsrv while holding it hung every
             # other request for 30 s (the core's cleanup hit its deadline, KEM-462).
