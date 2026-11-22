@@ -35,18 +35,23 @@ json.dump({"kyrmesh-install": open("install.sh").read(), "kyrmesh-host": "$HOST"
           open("attributes.json", "w"))
 EOF
   printf '{"pebble":{"listenAddress":"127.0.0.1:14000","managementListenAddress":"127.0.0.1:15000","certificate":"%s/tls.crt","privateKey":"%s/tls.key","httpPort":5002,"tlsPort":5001,"externalAccountBindingRequired":false}}\n' "$T" "$T" > pebble.json
-  # The fake network: the public names resolve to TEST-NET addresses that nftables hands to the mocks.
+  # The fake network, as on GCE: the resolver is 169.254.169.254, held here on lo by challtestsrv
+  # itself (not reached through DNAT), so a unit that denies that address is denied here too. Every
+  # A query answers the TEST-NET address that nftables hands to the mocks; metadata.google.internal
+  # comes from /etc/hosts, as GCE images ship it.
   cat > net.sh <<'EOF'
 #!/bin/bash
-grep -q kyrmesh-test /etc/hosts || printf '203.0.113.10 api.cloudflare.com secretmanager.googleapis.com github.com # kyrmesh-test\n203.0.113.11 metadata.google.internal # kyrmesh-test\n' >> /etc/hosts
+grep -q kyrmesh-test /etc/hosts || printf '203.0.113.11 metadata.google.internal # kyrmesh-test\n' >> /etc/hosts
+ip -4 addr show dev lo | grep -q 169.254.169.254 || ip addr add 169.254.169.254/32 dev lo
+printf 'nameserver 169.254.169.254\n' > /etc/resolv.conf.kt && mv -f /etc/resolv.conf.kt /etc/resolv.conf
 nft list table ip kyrmesh_test >/dev/null 2>&1 || nft -f - <<'NFT'
 table ip kyrmesh_test {
   chain out {
     type nat hook output priority -100;
     ip daddr 203.0.113.10 tcp dport 443 dnat to 127.0.0.1:8443
     ip daddr 203.0.113.11 tcp dport 80 dnat to 127.0.0.1:8080
-    ip daddr 1.1.1.1 udp dport 53 dnat to 127.0.0.1:8053
-    ip daddr 1.1.1.1 tcp dport 53 dnat to 127.0.0.1:8053
+    ip daddr 1.1.1.1 udp dport 53 dnat to 169.254.169.254:53
+    ip daddr 1.1.1.1 tcp dport 53 dnat to 169.254.169.254:53
   }
 }
 NFT
@@ -54,9 +59,10 @@ EOF
   chmod +x net.sh pebble pebble-challtestsrv
   unit() { printf '[Unit]\nBefore=kyrmesh-dns-a.service kyrmesh.service\nAfter=kt-net.service\n[Service]\n%s\n[Install]\nWantedBy=multi-user.target\n' "$2" > "/etc/systemd/system/$1.service"; }
   printf '[Unit]\nBefore=kyrmesh-dns-a.service kyrmesh.service\nAfter=network.target\n[Service]\nType=oneshot\nRemainAfterExit=yes\nExecStart=%s/net.sh\n[Install]\nWantedBy=multi-user.target\n' "$T" > /etc/systemd/system/kt-net.service
-  unit kt-dns "ExecStart=$T/pebble-challtestsrv -dnsserver 127.0.0.1:8053 -management 127.0.0.1:8055 -http01 '' -https01 '' -tlsalpn01 '' -doh ''"
+  unit kt-dns "ExecStart=$T/pebble-challtestsrv -dnsserver 169.254.169.254:53 -management 127.0.0.1:8055 -defaultIPv4 203.0.113.10 -defaultIPv6 '' -http01 '' -https01 '' -tlsalpn01 '' -doh ''
+ExecStartPost=/usr/bin/timeout 10 /bin/sh -c 'until getent ahostsv4 api.cloudflare.com >/dev/null; do sleep 0.1; done'"
   unit kt-pebble "Environment=PEBBLE_VA_NOSLEEP=1 PEBBLE_WFE_NONCEREJECT=0 PEBBLE_AUTHZREUSE=0
-ExecStart=$T/pebble -config $T/pebble.json -dnsserver 127.0.0.1:8053"
+ExecStart=$T/pebble -config $T/pebble.json -dnsserver 169.254.169.254:53"
   # On GCE the metadata server answers before the VM's userspace starts; the stand-ins count as
   # started only once both ports answer, or dns-a can boot first and fall back to a public echo.
   unit kt-mocks "ExecStart=/usr/bin/python3 $T/mocks.py $T
