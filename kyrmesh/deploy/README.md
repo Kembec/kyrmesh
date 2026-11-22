@@ -97,7 +97,7 @@ binarios de forma reproducible y los publica con `SHA256SUMS`. Después se fijan
 sumas en `RELEASE`, comprobadas contra una compilación local del mismo commit:
 
 ```sh
-CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -trimpath -ldflags=-buildid= -o kyrmesh-linux-amd64 ./cmd/headscale
+GOTOOLCHAIN=go1.27.3 CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -trimpath -ldflags=-buildid= -o kyrmesh-linux-amd64 ./cmd/headscale
 ```
 
 ## Probar sin nube

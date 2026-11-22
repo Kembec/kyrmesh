@@ -6,10 +6,22 @@ name: Kyrmesh e2e
 
 on:
   workflow_dispatch:
+  push:
+    branches: [kyrmesh]
+    paths:
+      - "kyrmesh/deploy/**"
+      - "hscontrol/**"
+      - "cmd/**"
+      - "go.mod"
+      - "go.sum"
+      - ".github/workflows/kyrmesh-e2e.yml"
   pull_request:
     paths:
       - "kyrmesh/deploy/**"
-      - "hscontrol/dnscert/**"
+      - "hscontrol/**"
+      - "cmd/**"
+      - "go.mod"
+      - "go.sum"
       - ".github/workflows/kyrmesh-e2e.yml"
 
 permissions:
@@ -36,13 +48,13 @@ jobs:
 
       - name: Test dnscert
         env:
-          GOTOOLCHAIN: auto
+          GOTOOLCHAIN: go1.27.3
         run: go test ./hscontrol/dnscert/...
 
       - name: Build kyrmesh-linux-amd64
         env:
           CGO_ENABLED: "0"
-          GOTOOLCHAIN: auto
+          GOTOOLCHAIN: go1.27.3
         run: |
           mkdir -p dist
           GOOS=linux GOARCH=amd64 go build -trimpath -ldflags=-buildid= \
