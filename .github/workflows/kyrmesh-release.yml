@@ -1,0 +1,52 @@
+---
+# Publishes the Linux binaries that kyrmesh/deploy installs. A tag kyrmesh-v* builds
+# kyrmesh-linux-amd64 and kyrmesh-linux-arm64 from that commit, writes SHA256SUMS and attaches the
+# three files to a GitHub release. Builds are reproducible (CGO off, -trimpath, empty build id,
+# the Go toolchain go.mod pins), so the sums can be checked against a local build before pinning
+# them in kyrmesh/deploy/RELEASE.
+name: Kyrmesh release
+
+on:
+  push:
+    tags:
+      - "kyrmesh-v*"
+
+permissions:
+  contents: write
+
+concurrency:
+  group: kyrmesh-release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  release:
+    if: github.repository == 'Kembec/kyrmesh'
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: Checkout
+        uses: actions/checkout@8e8c483db84b4bee98b60c0593521ed34d9990e8 # v6.0.1
+        with:
+          persist-credentials: false
+
+      - name: Build
+        env:
+          CGO_ENABLED: "0"
+          GOTOOLCHAIN: go1.27.3 # the exact toolchain, so the bytes match a local build
+        run: |
+          mkdir dist
+          for arch in amd64 arm64; do
+            GOOS=linux GOARCH=$arch go build -trimpath -ldflags=-buildid= \
+              -o "dist/kyrmesh-linux-$arch" ./cmd/headscale
+          done
+          (cd dist && sha256sum kyrmesh-linux-* > SHA256SUMS && cat SHA256SUMS)
+          go version -m dist/kyrmesh-linux-amd64 | grep -E 'vcs.(revision|modified)'
+
+      - name: Publish
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ github.ref_name }}
+        run: |
+          gh release create "$TAG" dist/kyrmesh-linux-amd64 dist/kyrmesh-linux-arm64 dist/SHA256SUMS \
+            --repo "$GITHUB_REPOSITORY" --title "$TAG" --verify-tag \
+            --notes "Linux binaries for kyrmesh/deploy. SHA-256 in SHA256SUMS."

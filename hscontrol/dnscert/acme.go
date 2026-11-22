@@ -129,7 +129,10 @@ func (m *Manager) obtain(ctx context.Context) error {
 		return fmt.Errorf("building csr: %w", err)
 	}
 
-	chain, _, err := client.CreateOrderCert(ctx, order.FinalizeURL, csr, true)
+	// CreateOrderCert follows the Location of the finalize response, which
+	// RFC 8555 does not require: Pebble omits it and the e2e sent `Post ""`.
+	// CreateCertFromOrder polls the order URL already known.
+	chain, _, err := client.CreateCertFromOrder(ctx, order, csr, true)
 	if err != nil {
 		return fmt.Errorf("finalizing order: %w", err)
 	}

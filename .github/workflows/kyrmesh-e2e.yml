@@ -1,0 +1,95 @@
+---
+# Runs the end-to-end test of the one-step core install (kyrmesh/deploy/test/e2e-lima.sh) in a
+# disposable Lima VM on the runner. Every external service is a local stand-in inside the VM
+# (Pebble, challtestsrv, mocks.py), so the job needs no secrets and creates nothing outside it.
+name: Kyrmesh e2e
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [kyrmesh]
+    paths:
+      - "kyrmesh/deploy/**"
+      - "hscontrol/**"
+      - "cmd/**"
+      - "go.mod"
+      - "go.sum"
+      - ".github/workflows/kyrmesh-e2e.yml"
+  pull_request:
+    paths:
+      - "kyrmesh/deploy/**"
+      - "hscontrol/**"
+      - "cmd/**"
+      - "go.mod"
+      - "go.sum"
+      - ".github/workflows/kyrmesh-e2e.yml"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: kyrmesh-e2e-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  LIMA_VERSION: "2.2.1"
+  LIMA_SHA256: "b391ac7fcac2b2a5a1628107756463188ded4d18d3104a40a66a8bb6fec01bcb"
+  PEBBLE_VERSION: "v2.10.3"
+
+jobs:
+  e2e:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - name: Checkout
+        uses: actions/checkout@8e8c483db84b4bee98b60c0593521ed34d9990e8 # v6.0.1
+        with:
+          persist-credentials: false
+
+      - name: Test dnscert
+        env:
+          GOTOOLCHAIN: go1.27.3
+        run: go test ./hscontrol/dnscert/...
+
+      - name: Build kyrmesh-linux-amd64
+        env:
+          CGO_ENABLED: "0"
+          GOTOOLCHAIN: go1.27.3
+        run: |
+          mkdir -p dist
+          GOOS=linux GOARCH=amd64 go build -trimpath -ldflags=-buildid= \
+            -o dist/kyrmesh-linux-amd64 ./cmd/headscale
+
+      - name: Build Pebble
+        env:
+          CGO_ENABLED: "0"
+          GOTOOLCHAIN: auto
+          GOFLAGS: -trimpath
+        run: |
+          mkdir -p "$RUNNER_TEMP/pebble"
+          GOBIN="$RUNNER_TEMP/pebble" go install \
+            "github.com/letsencrypt/pebble/v2/cmd/pebble@$PEBBLE_VERSION" \
+            "github.com/letsencrypt/pebble/v2/cmd/pebble-challtestsrv@$PEBBLE_VERSION"
+          ls -l "$RUNNER_TEMP/pebble"
+
+      - name: Enable KVM
+        run: |
+          echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' \
+            | sudo tee /etc/udev/rules.d/99-kvm4all.rules
+          sudo udevadm control --reload-rules
+          sudo udevadm trigger --name-match=kvm
+          ls -l /dev/kvm
+
+      - name: Install QEMU and Lima
+        run: |
+          sudo apt-get update -qq
+          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y -qq qemu-system-x86 qemu-utils ovmf
+          tarball="lima-$LIMA_VERSION-Linux-x86_64.tar.gz"
+          curl -fsSLo "$RUNNER_TEMP/$tarball" \
+            "https://github.com/lima-vm/lima/releases/download/v$LIMA_VERSION/$tarball"
+          echo "$LIMA_SHA256  $RUNNER_TEMP/$tarball" | sha256sum -c -
+          sudo tar -C /usr/local -xzf "$RUNNER_TEMP/$tarball"
+          limactl --version
+
+      - name: e2e (setup, boot, rerun, tamper, reboot)
+        run: kyrmesh/deploy/test/e2e-lima.sh dist/kyrmesh-linux-amd64 "$RUNNER_TEMP/pebble" x86_64

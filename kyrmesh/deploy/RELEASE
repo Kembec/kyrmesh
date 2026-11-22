@@ -1,0 +1,5 @@
+# Release that install.sh and the GCP kit install, with the SHA-256 of each binary.
+# Filled after the release workflow publishes the tag; the installers refuse an empty value.
+version=
+sha256_amd64=
+sha256_arm64=
