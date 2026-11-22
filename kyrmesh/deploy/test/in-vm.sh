@@ -57,7 +57,10 @@ EOF
   unit kt-dns "ExecStart=$T/pebble-challtestsrv -dnsserver 127.0.0.1:8053 -management 127.0.0.1:8055 -http01 '' -https01 '' -tlsalpn01 '' -doh ''"
   unit kt-pebble "Environment=PEBBLE_VA_NOSLEEP=1 PEBBLE_WFE_NONCEREJECT=0 PEBBLE_AUTHZREUSE=0
 ExecStart=$T/pebble -config $T/pebble.json -dnsserver 127.0.0.1:8053"
-  unit kt-mocks "ExecStart=/usr/bin/python3 $T/mocks.py $T"
+  # On GCE the metadata server answers before the VM's userspace starts; the stand-ins count as
+  # started only once both ports answer, or dns-a can boot first and fall back to a public echo.
+  unit kt-mocks "ExecStart=/usr/bin/python3 $T/mocks.py $T
+ExecStartPost=/usr/bin/timeout 10 /bin/sh -c 'until curl -s -o /dev/null http://127.0.0.1:8080/ && curl -sk -o /dev/null https://127.0.0.1:8443/; do sleep 0.1; done'"
   systemctl daemon-reload
   systemctl enable kt-net kt-dns kt-pebble kt-mocks >/dev/null 2>&1; systemctl restart kt-net kt-dns kt-pebble kt-mocks
   for _ in $(seq 1 30); do curl -fsS -o /dev/null https://localhost:14000/dir 2>/dev/null && break; sleep 1; done
