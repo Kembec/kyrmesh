@@ -283,9 +283,9 @@ MemoryDenyWriteExecute=yes
 SystemCallArchitectures=native
 RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX AF_NETLINK
 MemoryMax=512M
-# The core never needs the metadata server; denied, it cannot mint the VM service account's
-# token and read the Cloudflare secret around the 0400 file (review M2, KEM-462).
-IPAddressDeny=169.254.169.254/32
+# No IPAddressDeny for 169.254.169.254: on GCE that address is also the DNS resolver, so the core
+# could not resolve Cloudflare or the CA; and what the metadata server would hand out, the
+# Cloudflare token, the core already reads from its 0400 file.
 
 [Install]
 WantedBy=multi-user.target
