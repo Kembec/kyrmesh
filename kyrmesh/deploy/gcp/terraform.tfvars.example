@@ -1,0 +1,7 @@
+project_id      = "my-gcp-project"
+server_host     = "ctrl.net.example.com"
+cloudflare_zone = "example.com"
+# region     = "us-east1"
+# zone       = "us-east1-b"
+# first_user = "admin"
+# The token is not set here: up.sh passes it as TF_VAR_cloudflare_token from CLOUDFLARE_API_TOKEN.
