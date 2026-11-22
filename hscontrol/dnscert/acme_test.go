@@ -114,6 +114,7 @@ func (ca *fakeCA) serve(w http.ResponseWriter, r *http.Request) {
 // finalize issues a certificate for the CSR inside the JWS payload.
 func (ca *fakeCA) finalize(r *http.Request) {
 	var jws struct{ Payload string }
+
 	err := json.NewDecoder(r.Body).Decode(&jws)
 	if err != nil {
 		ca.t.Errorf("finalize body: %v", err)
@@ -127,6 +128,7 @@ func (ca *fakeCA) finalize(r *http.Request) {
 	}
 
 	var req struct{ CSR string }
+
 	err = json.Unmarshal(payload, &req)
 	if err != nil {
 		ca.t.Errorf("finalize request: %v", err)
