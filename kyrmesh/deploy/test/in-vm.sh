@@ -70,7 +70,9 @@ ExecStart=$T/pebble -config $T/pebble.json -dnsserver 127.0.0.1:8053"
 
 checks() {
   systemctl is-active --quiet kyrmesh || fail "kyrmesh not active"
-  curl -fsS "https://localhost:15000/roots/0" -o "$T/pebble-root.pem"
+  # Pebble makes a new root every time it starts; the certificate the server caches chains to the
+  # root of the first boot, as a real one keeps chaining to a CA root that does not change.
+  [[ -s "$T/pebble-root.pem" ]] || curl -fsS "https://localhost:15000/roots/0" -o "$T/pebble-root.pem"
   code=$(curl -sS -o /dev/null -w '%{http_code}' --cacert "$T/pebble-root.pem" --resolve "$HOST:443:127.0.0.1" "https://$HOST/health")
   [[ $code == 200 ]] || fail "health over TLS answered $code"
   san=$(echo | openssl s_client -connect 127.0.0.1:443 -servername "$HOST" 2>/dev/null | openssl x509 -noout -ext subjectAltName | tail -1 | tr -d ' ')
