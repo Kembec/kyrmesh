@@ -50,7 +50,11 @@ func (ca *fakeCA) reply(w http.ResponseWriter, code int, location string, body a
 	}
 
 	w.WriteHeader(code)
-	_ = json.NewEncoder(w).Encode(body)
+
+	err := json.NewEncoder(w).Encode(body)
+	if err != nil {
+		ca.t.Errorf("encode reply: %v", err)
+	}
 }
 
 func (ca *fakeCA) order() map[string]any {
@@ -110,7 +114,8 @@ func (ca *fakeCA) serve(w http.ResponseWriter, r *http.Request) {
 // finalize issues a certificate for the CSR inside the JWS payload.
 func (ca *fakeCA) finalize(r *http.Request) {
 	var jws struct{ Payload string }
-	if err := json.NewDecoder(r.Body).Decode(&jws); err != nil {
+	err := json.NewDecoder(r.Body).Decode(&jws)
+	if err != nil {
 		ca.t.Errorf("finalize body: %v", err)
 		return
 	}
@@ -122,7 +127,8 @@ func (ca *fakeCA) finalize(r *http.Request) {
 	}
 
 	var req struct{ CSR string }
-	if err := json.Unmarshal(payload, &req); err != nil {
+	err = json.Unmarshal(payload, &req)
+	if err != nil {
 		ca.t.Errorf("finalize request: %v", err)
 		return
 	}
@@ -188,7 +194,8 @@ func TestFinalizeWithoutLocationStillIssues(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
 	defer cancel()
 
-	if err := m.obtain(ctx); err != nil {
+	err = m.obtain(ctx)
+	if err != nil {
 		t.Fatalf("obtain = %v, want the certificate", err)
 	}
 
