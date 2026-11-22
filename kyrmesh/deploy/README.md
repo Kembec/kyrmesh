@@ -48,7 +48,7 @@ actualizar o retirar el servidor.
 instalador y sus parámetros, pide el token a Secret Manager y ejecuta `install.sh`, que:
 
 1. descarga el binario de la versión fijada en `RELEASE` y lo rechaza si su SHA-256 no coincide;
-2. crea el usuario de sistema `kyrmesh` y guarda el token con permiso 0400 solo para él (el servicio no puede llegar al servidor de metadatos, así que tampoco al secreto por la cuenta de servicio);
+2. crea el usuario de sistema `kyrmesh` y guarda el token con permiso 0400 solo para él (el servicio sí llega al servidor de metadatos, que en GCE es también el DNS; la cuenta de servicio solo puede leer ese mismo secreto, así que no da más que el archivo);
 3. escribe la configuración, la valida con `configtest` y deja una política que niega todo salvo
    que los dispositivos del primer usuario se vean entre sí;
 4. instala dos servicios de systemd: `kyrmesh-dns-a`, que en cada arranque apunta el registro A a la
