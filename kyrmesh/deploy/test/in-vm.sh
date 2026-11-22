@@ -118,11 +118,20 @@ tamper() {
   pass "a binary that does not match its pinned SHA-256 is refused before anything changes"
 }
 
+# What dns-a saw at this boot, for a failed reboot check: its log, the stand-ins' last calls and
+# the stand-in zone (test addresses and challenge names only, nothing secret).
+dns_a_diag() {
+  echo "--- dns-a, this boot"; journalctl -u kyrmesh-dns-a -b --no-pager -o short-monotonic || true
+  echo "--- stand-in calls, last 15"; tail -n 15 "$T/calls.log" || true
+  echo "--- stand-in zone"; cat "$T/zone.json" 2>/dev/null || echo "(no zone.json)"
+  echo "--- public-ip file"; cat /etc/kyrmesh/public-ip || true
+}
+
 reboot_checks() {
   for _ in $(seq 1 60); do systemctl is-active --quiet kyrmesh && break; sleep 2; done
   for _ in $(seq 1 30); do journalctl -u kyrmesh -b --no-pager | grep -q 'dnscert: loaded cached certificate' && break; sleep 2; done
   journalctl -u kyrmesh-dns-a -b --no-pager | grep -q 'A record already points here' \
-    || fail "dns-a did not find its A record at boot: $(journalctl -u kyrmesh-dns-a -b --no-pager -o cat | tail -1)"
+    || { dns_a_diag; fail "dns-a did not find its A record at boot"; }
   journalctl -u kyrmesh -b --no-pager | grep -q 'dnscert: loaded cached certificate' || fail "certificate not reused after reboot"
   checks
   pass "after a reboot: A record checked, cached certificate reused, server answering"
